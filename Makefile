@@ -2,7 +2,7 @@ RISCV_GNU ?= riscv64-unknown-elf
 CC = $(RISCV_GNU)-gcc
 LD = $(RISCV_GNU)-ld
 OBJCOPY = $(RISCV_GNU)-objcopy
-CFLAGS = -mcmodel=medany -ffreestanding -nostdlib -g -Wall
+CFLAGS = -mcmodel=medany -ffreestanding -nostdlib -g -Wall -I include
 QEMU ?= qemu-system-riscv64
 TARGET = kernel
 
@@ -12,7 +12,7 @@ ifeq ($(PLATFORM), QEMU)
 	LDSCRIPT = linker_qemu.ld
     CFLAGS += -DQEMU
 else
-	LDSCRIPT = linker_qemu.ld
+	LDSCRIPT = linker_board.ld
     CFLAGS += -DBOARD
 endif
 
@@ -23,7 +23,7 @@ build: clean
 	mkimage -f kernel.its kernel.fit
 
 run: build $(TARGET)
-	$(QEMU) -M virt -m 8G -kernel $(TARGET) -display none -serial stdio
+	$(QEMU) -M virt -m 8G -kernel $(TARGET) -initrd initramfs.cpio -display none -serial pty
 
 clean:
 	rm -f $(TARGET) $(TARGET).elf *.o *.bin kernel *.fit
