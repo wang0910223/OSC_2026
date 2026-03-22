@@ -97,5 +97,4 @@ void code_relocate(int hart_id, void *dtb_ptr)
         "jr %0"
         :
         : "r"(relocate_addr), "r"(a0), "r"(a1));
-    /* ((void (*)()) relocate_addr)(); */
 }
