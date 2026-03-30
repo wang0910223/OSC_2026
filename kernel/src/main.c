@@ -1,6 +1,8 @@
-#include "../include/uart.h"
-#include "../include/shell.h"
-#include "../include/dtb.h"
+#include "uart.h"
+#include "shell.h"
+#include "dtb.h"
+#include "buddy.h"
+#include "types.h"
 
 int boot_hart_id;
 
@@ -37,7 +39,13 @@ void main(int hart_id, void *dtb_ptr)
     uart_hex((unsigned long)cpio_addr);
 #endif
 
-    uart_puts("\nKernel Starting...\n");
+    uart_puts("\nKernel Starting...\n\n");
+
+    /* Step 4: Initialize the buddy page-frame allocator. */
+    buddy_init();
+
+    /* Step 5: Initialize the dynamic memory allocator (chunk pools). */
+    kmalloc_init();
 
     shell();
 

@@ -7,7 +7,6 @@
 *.elf
 *.img
 *fit
-*kernel
 
 *~
 *.swp

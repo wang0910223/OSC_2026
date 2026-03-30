@@ -40,6 +40,7 @@ void command_help()
 {
     uart_puts("help  - show all commands.\n");
     uart_puts("hello - print Hello World!\n");
+    uart_puts("load  - receive kernel over UART and boot.\n");
     uart_puts("info  - print system info.\n");
     uart_puts("ls    - list files in initramfs.\n");
     uart_puts("cat   - display file content (usage: cat <filename>).\n");

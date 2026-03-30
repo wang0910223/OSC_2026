@@ -24,11 +24,11 @@ endif
 build: clean
 	$(CC) $(CFLAGS) -c src/*.S src/*.c
 	$(LD) -T $(LDSCRIPT) -o $(TARGET).elf *.o
-	$(OBJCOPY) -O binary $(TARGET).elf $(TARGET)
+	$(OBJCOPY) -O binary $(TARGET).elf $(TARGET).bin
 	mkimage -f kernel.its kernel.fit
 
-run: build $(TARGET)
-	$(QEMU) -M virt -m 8G -kernel $(TARGET) -initrd initramfs.cpio -display none -serial stdio
+run: build $(TARGET).bin
+	$(QEMU) -M virt -m 8G -kernel $(TARGET).bin -initrd initramfs.cpio -display none -serial stdio
 
 clean:
-	rm -f $(TARGET) $(TARGET).elf *.o *.bin kernel *.fit
+	rm -f $(TARGET).bin $(TARGET).elf *.o *.bin kernel *.fit
