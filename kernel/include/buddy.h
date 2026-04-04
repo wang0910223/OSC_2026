@@ -11,19 +11,27 @@
 /* Frame-array sentinel values */
 #define FRAME_FREE_PART  (-1)        /* <F>: free but belongs to larger block */
 
-/* Managed physical memory region (basic exercise, hardcoded).
- *
- * QEMU virt : RAM at 0x80000000; use 0x90000000–0xA0000000 (safe).
- * OrangePi  : use 0x10000000–0x20000000 as suggested by the lab spec.
- */
-#ifdef QEMU
-#define BUDDY_BASE       0x90000000UL
-#define BUDDY_END        0xA0000000UL
-#else
-#define BUDDY_BASE       0x10000000UL
-#define BUDDY_END        0x20000000UL
-#endif
-#define TOTAL_PAGES      ((BUDDY_END - BUDDY_BASE) / PAGE_SIZE)  /* 65536 */
+
+
+// /* Managed physical memory region (basic exercise, hardcoded).
+//  *
+//  * QEMU virt : RAM at 0x80000000; use 0x90000000–0xA0000000 (safe).
+//  * OrangePi  : use 0x10000000–0x20000000 as suggested by the lab spec.
+//  */
+// #ifdef QEMU
+// #define BUDDY_BASE       0x90000000UL
+// #define BUDDY_END        0xA0000000UL
+// #else
+// #define BUDDY_BASE       0x10000000UL
+// #define BUDDY_END        0x20000000UL
+// #endif
+// #define TOTAL_PAGES      ((BUDDY_END - BUDDY_BASE) / PAGE_SIZE)  /* 65536 */
+
+
+
+extern uintptr_t buddy_base_addr;
+extern uintptr_t buddy_end_addr;
+extern unsigned long buddy_total_pages;
 
 /* ---------- Public API -------------------------------------------------- */
 
@@ -43,5 +51,10 @@ void *buddy_alloc(unsigned long size);
  * Free memory previously returned by buddy_alloc().
  */
 void buddy_free(void *ptr);
+
+/**
+ * Reserve physical memory boundaries before buddy system brings up memory tracking.
+ */
+void memory_reserve(uint64_t start, uint64_t size);
 
 #endif /* __BUDDY_H__ */

@@ -3,6 +3,7 @@
 #include "uart.h"
 #include "utils.h"
 #include "types.h"
+#include "dtb.h"
 
 /* ===== Frame Array ======================================================
  *
@@ -19,7 +20,62 @@
 #define GET_ALLOC_ORDER(val) ((val) & 0xFF)
 #define GET_ALLOC_IDX(val) (((val) >> 8) & 0x3FFFFF)
 
-static int frame_array[TOTAL_PAGES];
+uintptr_t buddy_base_addr = 0;
+uintptr_t buddy_end_addr = 0;
+unsigned long buddy_total_pages = 0;
+int *frame_array = NULL;
+
+extern char _start[];
+extern char _end[];
+
+typedef struct {
+    uint64_t start;
+    uint64_t end;
+} mem_region_t;
+
+#define MAX_RESERVED_REGIONS 32
+static mem_region_t reserved_regions[MAX_RESERVED_REGIONS];
+static int num_reserved = 0;
+
+void memory_reserve(uint64_t start, uint64_t size) {
+    if (num_reserved < MAX_RESERVED_REGIONS) {
+        reserved_regions[num_reserved].start = start;
+        reserved_regions[num_reserved].end = start + size;
+        uart_puts("[Reserve] Reserved address [");
+        uart_hex(start);
+        uart_puts(", ");
+        uart_hex(start + size);
+        uart_puts("]\n");
+        num_reserved++;
+    }
+}
+
+static void *startup_alloc(unsigned long size) {
+    unsigned long pages_needed = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    unsigned long idx = 0;
+    while (idx + pages_needed <= buddy_total_pages) {
+        int ok = 1;
+        uint64_t start_addr = buddy_base_addr + idx * PAGE_SIZE;
+        uint64_t end_addr = start_addr + pages_needed * PAGE_SIZE;
+
+        for (int i = 0; i < num_reserved; i++) {
+            if (!(end_addr <= reserved_regions[i].start || start_addr >= reserved_regions[i].end)) {
+                ok = 0;
+                unsigned long clash_end_idx = (reserved_regions[i].end - buddy_base_addr + PAGE_SIZE - 1) / PAGE_SIZE;
+                if (clash_end_idx > idx)
+                    idx = clash_end_idx;
+                else
+                    idx++;
+                break;
+            }
+        }
+        if (ok) {
+            memory_reserve(start_addr, pages_needed * PAGE_SIZE);
+            return (void *)start_addr;
+        }
+    }
+    return NULL;
+}
 
 /* One free-list head per order (0 .. MAX_ORDER). */
 static struct list_head free_list[MAX_ORDER + 1];
@@ -29,13 +85,13 @@ static struct list_head free_list[MAX_ORDER + 1];
 /** Convert a frame index to the physical address it represents. */
 static inline uintptr_t idx_to_addr(unsigned long idx)
 {
-    return BUDDY_BASE + idx * PAGE_SIZE;
+    return buddy_base_addr + idx * PAGE_SIZE;
 }
 
 /** Convert a physical address back to a frame index. */
 static inline unsigned long addr_to_idx(uintptr_t addr)
 {
-    return (addr - BUDDY_BASE) / PAGE_SIZE;
+    return (addr - buddy_base_addr) / PAGE_SIZE;
 }
 
 /**
@@ -113,7 +169,7 @@ static void log_buddy_found(unsigned long buddy_idx, unsigned long page_idx,
 
 static void log_alloc(uintptr_t addr, int order, unsigned long page_idx)
 {
-    uart_puts("[Page] Allocate 0x");
+    uart_puts("[Page] Allocate ");
     uart_hex(addr);
     uart_puts(" at order ");
     uart_dec((unsigned long)order);
@@ -124,7 +180,7 @@ static void log_alloc(uintptr_t addr, int order, unsigned long page_idx)
 
 static void log_free(uintptr_t addr, int order, unsigned long page_idx)
 {
-    uart_puts("[Page] Free 0x");
+    uart_puts("[Page] Free ");
     uart_hex(addr);
     uart_puts(" and add back to order ");
     uart_dec((unsigned long)order);
@@ -165,24 +221,81 @@ static void block_pop(unsigned long idx, int order)
 
 void buddy_init(void)
 {
+    uintptr_t dtb_mem_start;
+    uint64_t dtb_mem_size = 0;
+    dtb_get_memory_region(&dtb_mem_start, &dtb_mem_size);
+    if (dtb_mem_size == 0) {
+        /* Fallback for QEMU virt if devicetree fails */
+        uart_puts("Fallback for QEMU virt if devicetree fails\n");
+        dtb_mem_start = 0x80000000;
+        dtb_mem_size  = 0x10000000; /* 256MB */
+    }
+    uart_puts("dtb_mem_start=");
+    uart_hex(dtb_mem_start);
+    uart_puts("\ndtb_mem_size=");
+    uart_hex(dtb_mem_size);
+    uart_puts("\n");
+
+    buddy_base_addr = dtb_mem_start;
+    buddy_end_addr = dtb_mem_start + dtb_mem_size;
+    buddy_total_pages = dtb_mem_size / PAGE_SIZE;
+
+    /* Reserve kernel regions explicitly */
+    memory_reserve((uintptr_t)_start, (uintptr_t)_end - (uintptr_t)_start);
+    
+    if (dtb_addr)
+        memory_reserve((uintptr_t)dtb_addr, dtb_get_totalsize());
+
+    if (cpio_addr) {
+        /* Estimate initramfs size as a generic chunk / bounding box or maybe hardcoded to 20MB for safety if we don't parse length */
+        /* Currently we only get start address from dtb_load_initrd_addr. Let's reserve 16MB just in case,
+           or if the user provided it in device tree, we parse it properly. */
+        memory_reserve((uintptr_t)cpio_addr, 0x1000000); // 16MB reserve
+    }
+
+    dtb_find_and_reserve_memory();
+
+    /* Allocate frame_array itself via bump pointer (Advanced Exercise 3) */
+    frame_array = (int *)startup_alloc(buddy_total_pages * sizeof(int));
+    if (!frame_array) {
+        uart_puts("Failed to allocate frame_array!\n");
+        return;
+    }
+
     /* Initialise all free list heads. */
     for (int i = 0; i <= MAX_ORDER; i++)
         INIT_LIST_HEAD(&free_list[i]);
 
-    /* All frames start as FRAME_FREE_PART (will be overwritten for heads). */
-    for (unsigned long i = 0; i < TOTAL_PAGES; i++)
+    /* All frames start as FRAME_FREE_PART */
+    for (unsigned long i = 0; i < buddy_total_pages; i++)
         frame_array[i] = FRAME_FREE_PART;
+
+    /* Flag reserved regions in frame_array */
+    for (int i = 0; i < num_reserved; i++) {
+        unsigned long start_idx = (reserved_regions[i].start > buddy_base_addr) ? (reserved_regions[i].start - buddy_base_addr) / PAGE_SIZE : 0;
+        unsigned long end_idx = (reserved_regions[i].end > buddy_base_addr) ? (reserved_regions[i].end - buddy_base_addr + PAGE_SIZE -1) / PAGE_SIZE : 0;
+        if (start_idx < buddy_total_pages) {
+            for (unsigned long j = start_idx; j < end_idx && j < buddy_total_pages; j++) {
+                frame_array[j] = ALLOC_TAG(j, 0); // Marking it as effectively allocated
+            }
+        }
+    }
 
     /*
      * Build the initial free blocks.
      * Walk through the range and create the largest possible aligned blocks.
      */
     unsigned long idx = 0;
-    while (idx < TOTAL_PAGES)
+    while (idx < buddy_total_pages)
     {
+        if (frame_array[idx] != FRAME_FREE_PART) {
+            idx++;
+            continue;
+        }
+
         /* Find the largest order that:
          *   1) is aligned  (idx % (1 << order) == 0)
-         *   2) fits        (idx + (1 << order) <= TOTAL_PAGES)
+         *   2) fits        (idx + (1 << order) <= buddy_total_pages)
          *   3) <= MAX_ORDER
          */
         int order = MAX_ORDER;
@@ -190,8 +303,17 @@ void buddy_init(void)
         {
             unsigned long block_pages = 1UL << order;
             // check alignment  &&  check boundary
-            if ((idx & (block_pages - 1)) == 0 && idx + block_pages <= TOTAL_PAGES)
-                break;
+            if ((idx & (block_pages - 1)) == 0 && idx + block_pages <= buddy_total_pages) {
+                int all_free = 1;
+                for (unsigned long j = 0; j < block_pages; j++) {
+                    if (frame_array[idx + j] != FRAME_FREE_PART) {
+                        all_free = 0;
+                        break;
+                    }
+                }
+                if (all_free)
+                    break;
+            }
             order--;
         }
         block_push(idx, order);
@@ -199,9 +321,9 @@ void buddy_init(void)
     }
 
     uart_puts("[Buddy] Initialized: ");
-    uart_dec(TOTAL_PAGES);
+    uart_dec(buddy_total_pages);
     uart_puts(" pages (");
-    uart_dec(TOTAL_PAGES * PAGE_SIZE / 1024 / 1024);
+    uart_dec(buddy_total_pages * PAGE_SIZE / 1024 / 1024);
     uart_puts(" MiB) managed\n");
 }
 
@@ -255,7 +377,7 @@ void buddy_free(void *ptr)
         return;
 
     uintptr_t addr = (uintptr_t)ptr;
-    if (addr < BUDDY_BASE || addr >= BUDDY_END)
+    if (addr < buddy_base_addr || addr >= buddy_end_addr)
         return;
 
     unsigned long idx = addr_to_idx(addr);
@@ -276,7 +398,7 @@ void buddy_free(void *ptr)
         unsigned long buddy_idx = cur_idx ^ (1UL << cur_order);
 
         /* Buddy must be within range. */
-        if (buddy_idx >= TOTAL_PAGES)
+        if (buddy_idx >= buddy_total_pages)
             break;
 
         /* Buddy must be a free block head of the same order. */

@@ -1,6 +1,7 @@
 SECTIONS
 {
     . = 0x80200000;
+    _start = .;
     .text : { *(.text.boot) *(.text) }
     .rodata : { *(.rodata) }
     .data : { *(.data) }
@@ -13,4 +14,5 @@ SECTIONS
     . = ALIGN(16);
     . += 0x4000;     /* reserve 16 KB for stack */
     __stack_top = .;
+    _end = .;
 }

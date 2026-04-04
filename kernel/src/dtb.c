@@ -1,6 +1,7 @@
 #include "dtb.h"
 #include "uart.h"
 #include "utils.h"
+#include "buddy.h"
 
 #define FDT_BEGIN_NODE  0x00000001
 #define FDT_END_NODE    0x00000002
@@ -317,59 +318,148 @@ void dtb_load_initrd_addr(void)
 
 
 
-// void dtb_traverse(dtb_callback callback)
-// {
-//     if (!dtb_addr || !callback)
-//         return;
+uint64_t dtb_get_totalsize(void)
+{
+    if (!dtb_addr)
+        return 0;
+    struct fdt_header *header = (struct fdt_header *)dtb_addr;
+    return bswap_32(header->totalsize);
+}
 
-//     struct fdt_header *header = (struct fdt_header *)dtb_addr;
-//     if (bswap_32(header->magic) != FDT_HEADER_MAGIC) {
-//         uart_puts("Mismatched magic number in DTB!\n");
-//         return;
-//     }
+void dtb_get_memory_region(uintptr_t *start, uint64_t *size)
+{
+    int len = 0;
+    const void *prop = dtb_getprop("/memory", "reg", &len);
+    if (!prop || len < 4) {
+        *start = 0;
+        *size = 0;
+        return;
+    }
 
-//     uint32_t struct_size = bswap_32(header->size_dt_struct);
-//     char *dt_struct = (char *)header + bswap_32(header->off_dt_struct);
-//     char *dt_strings = (char *)header + bswap_32(header->off_dt_strings);
+    const uint32_t *p32 = (const uint32_t *)prop;
+    if (len >= 16) {
+        /* Usually #address-cells = 2, #size-cells = 2 */
+        uint64_t s_hi = bswap_32(p32[0]);
+        uint64_t s_lo = bswap_32(p32[1]);
+        uint64_t len_hi = bswap_32(p32[2]);
+        uint64_t len_lo = bswap_32(p32[3]);
+        *start = (uintptr_t)((s_hi << 32) | s_lo);
+        *size = (uint64_t)((len_hi << 32) | len_lo);
+    } else if (len >= 8) {
+        /* Assume #address-cells = 1, #size-cells = 1 for fallback */
+        uint64_t s = bswap_32(p32[0]);
+        uint64_t l_size = bswap_32(p32[1]);
+        *start = (uintptr_t)s;
+        *size = (uint64_t)l_size;
+    } else {
+        *start = 0;
+        *size = 0;
+    }
+}
 
-//     char *cur = dt_struct;
-//     char *struct_end = dt_struct + struct_size;
+static int in_reserved_memory_node = 0;
 
-//     while (cur < struct_end) {
-//         uint32_t token = bswap_32(*(uint32_t *)cur);
-//         cur += 4;
+static void reserved_memory_callback(uint32_t token, const char *name, const void *val)
+{
+    if (token == FDT_BEGIN_NODE) {
+        if (node_name_match(name, "reserved-memory")) {
+            in_reserved_memory_node = 1;
+        }
+    } else if (token == FDT_END_NODE) {
+        if (in_reserved_memory_node) {
+            /* If we just exited a node, we might have exited a subnode or reserved-memory itself.
+             * Since FDT traversing goes in order, we can't reliably detect exiting reserved-memory
+             * easily without keeping depth track. But we only need 'reg' within reserved-memory children.
+             */
+        }
+    }
+}
 
-//         if (token == FDT_BEGIN_NODE) {
-//             const char *name = cur;
-//             callback(token, name, 0);
-//             while (*cur)
-//                 cur++;
-//             cur++;
-//             cur = (char *)align_32((uint64_t)cur);
 
-//         } else if (token == FDT_END_NODE) {
-//             callback(token, 0, 0);
+/* Because depth tracking inside dtb_traverse is a bit complex via callback,
+ * let us implement a custom quick scan for /reserved-memory sub-nodes' "reg"
+ * directly copying some logic from dtb_getprop.
+ */
+void dtb_find_and_reserve_memory(void)
+{
+    if (!dtb_addr)
+        return;
 
-//         } else if (token == FDT_PROP) {
-//             struct fdt_prop *prop = (struct fdt_prop *)cur;
-//             cur += sizeof(struct fdt_prop);
+    struct fdt_header *header = (struct fdt_header *)dtb_addr;
+    if (bswap_32(header->magic) != FDT_HEADER_MAGIC)
+        return;
 
-//             uint32_t prop_len = bswap_32(prop->len);
-//             const char *prop_name = dt_strings + bswap_32(prop->nameoff);
-//             const void *prop_val = cur;
-//             callback(token, prop_name, prop_val);
+    uint32_t struct_size = bswap_32(header->size_dt_struct);
+    char *dt_struct = (char *)header + bswap_32(header->off_dt_struct);
+    char *dt_strings = (char *)header + bswap_32(header->off_dt_strings);
 
-//             cur += prop_len;
-//             cur = (char *)align_32((uint64_t)cur);
+    char *cur = dt_struct;
+    char *struct_end = dt_struct + struct_size;
 
-//         } else if (token == FDT_NOP) {
-//             continue;
+    int current_depth = -1;
+    int reserved_memory_depth = -1;
 
-//         } else if (token == FDT_END) {
-//             break;
+    while (cur < struct_end) {
+        uint32_t token = bswap_32(*(uint32_t *)cur);
+        cur += 4;
 
-//         } else {
-//             break;
-//         }
-//     }
-// }
+        if (token == FDT_BEGIN_NODE) {
+            const char *node_name = cur;
+            while (*cur)
+                cur++;
+            cur++;
+            cur = (char *)align_32((uint64_t)cur);
+
+            current_depth++;
+
+            if (reserved_memory_depth < 0) {
+                if (current_depth == 1 && node_name_match(node_name, "reserved-memory")) {
+                    reserved_memory_depth = current_depth;
+                }
+            }
+
+        } else if (token == FDT_END_NODE) {
+            if (reserved_memory_depth == current_depth)
+                reserved_memory_depth = -1;
+            current_depth--;
+
+        } else if (token == FDT_PROP) {
+            struct fdt_prop *prop = (struct fdt_prop *)cur;
+            cur += sizeof(struct fdt_prop);
+
+            uint32_t prop_len = bswap_32(prop->len);
+            const char *name = dt_strings + bswap_32(prop->nameoff);
+            const void *prop_val = cur;
+
+            cur += prop_len;
+            cur = (char *)align_32((uint64_t)cur);
+
+            /* If we are inside /reserved-memory and at depth 2 (child of reserved-memory) */
+            if (reserved_memory_depth >= 0 && current_depth == reserved_memory_depth + 1) {
+                if (strcmp(name, "reg") == 0) {
+                    const uint32_t *p32 = (const uint32_t *)prop_val;
+                    if (prop_len >= 16) {
+                        uint64_t s_hi = bswap_32(p32[0]);
+                        uint64_t s_lo = bswap_32(p32[1]);
+                        uint64_t len_hi = bswap_32(p32[2]);
+                        uint64_t len_lo = bswap_32(p32[3]);
+                        uint64_t r_start = (uintptr_t)((s_hi << 32) | s_lo);
+                        uint64_t r_size = (uint64_t)((len_hi << 32) | len_lo);
+                        memory_reserve(r_start, r_size);
+                    } else if (prop_len >= 8) {
+                        uint64_t s = bswap_32(p32[0]);
+                        uint64_t l_size = bswap_32(p32[1]);
+                        memory_reserve((uintptr_t)s, (uint64_t)l_size);
+                    }
+                }
+            }
+
+        } else if (token == FDT_NOP) {
+            continue;
+        } else if (token == FDT_END) {
+            break;
+        } else {
+            break;
+        }
+    }
+}

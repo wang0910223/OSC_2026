@@ -42,7 +42,7 @@ static pool_t pools[NUM_POOLS];
  * Index = (page_phys_addr - BUDDY_BASE) / PAGE_SIZE
  * Value = pool index (0..NUM_POOLS-1) or -1 for large / buddy-only pages.
  */
-static signed char page_pool_idx[TOTAL_PAGES];
+static signed char *page_pool_idx;
 
 /* ---- Helpers ----------------------------------------------------------- */
 
@@ -60,14 +60,14 @@ static int find_pool(unsigned long size)
 /** Convert a physical address to a page-frame index (relative to BUDDY_BASE). */
 static inline unsigned long addr_to_page_idx(uintptr_t addr)
 {
-    return (addr - BUDDY_BASE) / PAGE_SIZE;
+    return (addr - buddy_base_addr) / PAGE_SIZE;
 }
 
 /* ---- Logging ----------------------------------------------------------- */
 
 static void log_chunk_alloc(uintptr_t addr, unsigned long chunk_size)
 {
-    uart_puts("[Chunk] Allocate 0x");
+    uart_puts("[Chunk] Allocate ");
     uart_hex(addr);
     uart_puts(" at chunk size ");
     uart_dec(chunk_size);
@@ -76,7 +76,7 @@ static void log_chunk_alloc(uintptr_t addr, unsigned long chunk_size)
 
 static void log_chunk_free(uintptr_t addr, unsigned long chunk_size)
 {
-    uart_puts("[Chunk] Free 0x");
+    uart_puts("[Chunk] Free ");
     uart_hex(addr);
     uart_puts(" at chunk size ");
     uart_dec(chunk_size);
@@ -94,9 +94,11 @@ void kmalloc_init(void)
         pools[i].free_list = NULL;
     }
 
-    /* Mark all pages as "not owned by any pool" initially. */
-    for (unsigned long i = 0; i < TOTAL_PAGES; i++)
-        page_pool_idx[i] = -1;
+    page_pool_idx = (signed char *)buddy_alloc(buddy_total_pages * sizeof(signed char));
+    if (page_pool_idx) {
+        for (unsigned long i = 0; i < buddy_total_pages; i++)
+            page_pool_idx[i] = -1;
+    }
 
     uart_puts("[kmalloc] Initialized: ");
     uart_dec((unsigned long)NUM_POOLS);

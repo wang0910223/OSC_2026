@@ -188,8 +188,9 @@ static void command_test(void)
         kfree(kmem_ptr[i]);
     }
 
+    
     /* Test exceeding the maximum size */
-    char *kmem_ptr7 = (char *)kmalloc(TOTAL_PAGES * PAGE_SIZE + 1);
+    char *kmem_ptr7 = (char *)kmalloc(buddy_total_pages * PAGE_SIZE + 1);
     if (kmem_ptr7 == NULL)
     {
         uart_puts("Allocation failed as expected for size > MAX_ALLOC_SIZE\n");
