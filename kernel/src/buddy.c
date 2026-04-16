@@ -41,11 +41,13 @@ void memory_reserve(uint64_t start, uint64_t size) {
     if (num_reserved < MAX_RESERVED_REGIONS) {
         reserved_regions[num_reserved].start = start;
         reserved_regions[num_reserved].end = start + size;
+#ifdef DEBUG
         uart_puts("[Reserve] Reserved address [");
         uart_hex(start);
         uart_puts(", ");
         uart_hex(start + size);
         uart_puts("]\n");
+#endif
         num_reserved++;
     }
 }
@@ -129,6 +131,7 @@ static int pages_to_order(unsigned long pages)
 
 static void log_add(unsigned long idx, int order)
 {
+#ifdef DEBUG
     unsigned long count = 1UL << order;
     uart_puts("[+] Add page ");
     uart_dec(idx);
@@ -139,10 +142,12 @@ static void log_add(unsigned long idx, int order)
     uart_puts(", ");
     uart_dec(idx + count - 1);
     uart_puts("]\n");
+#endif
 }
 
 static void log_remove(unsigned long idx, int order)
 {
+#ifdef DEBUG
     unsigned long count = 1UL << order;
     uart_puts("[-] Remove page ");
     uart_dec(idx);
@@ -153,11 +158,12 @@ static void log_remove(unsigned long idx, int order)
     uart_puts(", ");
     uart_dec(idx + count - 1);
     uart_puts("]\n");
+#endif
 }
 
-static void log_buddy_found(unsigned long buddy_idx, unsigned long page_idx,
-                            int order)
+static void log_buddy_found(unsigned long buddy_idx, unsigned long page_idx, int order)
 {
+#ifdef DEBUG
     uart_puts("[*] Buddy found! buddy idx: ");
     uart_dec(buddy_idx);
     uart_puts(" for page ");
@@ -165,10 +171,12 @@ static void log_buddy_found(unsigned long buddy_idx, unsigned long page_idx,
     uart_puts(" with order ");
     uart_dec((unsigned long)order);
     uart_puts("\n");
+#endif
 }
 
 static void log_alloc(uintptr_t addr, int order, unsigned long page_idx)
 {
+#ifdef DEBUG
     uart_puts("[Page] Allocate ");
     uart_hex(addr);
     uart_puts(" at order ");
@@ -176,10 +184,12 @@ static void log_alloc(uintptr_t addr, int order, unsigned long page_idx)
     uart_puts(", page ");
     uart_dec(page_idx);
     uart_puts("\n");
+#endif
 }
 
 static void log_free(uintptr_t addr, int order, unsigned long page_idx)
 {
+#ifdef DEBUG
     uart_puts("[Page] Free ");
     uart_hex(addr);
     uart_puts(" and add back to order ");
@@ -187,6 +197,7 @@ static void log_free(uintptr_t addr, int order, unsigned long page_idx)
     uart_puts(", page ");
     uart_dec(page_idx);
     uart_puts("\n");
+#endif
 }
 
 /* ---- Internal: add / remove block from free list ----------------------- */

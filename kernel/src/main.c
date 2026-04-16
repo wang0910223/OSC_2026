@@ -3,6 +3,9 @@
 #include "dtb.h"
 #include "buddy.h"
 #include "types.h"
+#include "trap.h"
+#include "kmalloc.h"
+#include "timer.h"
 
 int boot_hart_id;
 
@@ -46,6 +49,11 @@ void main(int hart_id, void *dtb_ptr)
 
     /* Step 5: Initialize the dynamic memory allocator (chunk pools). */
     kmalloc_init();
+
+    trap_init();
+    uart_puts("[Trap] stvec installed.\n");
+
+    core_timer_enable();
 
     shell();
 

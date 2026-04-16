@@ -5,6 +5,9 @@
 #include "cpio.h"
 #include "buddy.h"
 #include "types.h"
+#include "trap.h"
+#include "kmalloc.h"
+
 #define BOOT_MAGIC 0x544F4F42UL
 
 #ifdef QEMU
@@ -26,6 +29,10 @@ typedef enum
 #define BUFFER_SIZE 128
 static char buffer[BUFFER_SIZE];
 static int buf_len = 0;
+static void run_user_program(const char *name);
+
+
+#define USER_STACK_SIZE  (16 * 1024)  /* 16 KiB user stack for prog.bin */
 
 SPECIAL_CHAR parse(char c)
 {
@@ -46,6 +53,7 @@ void command_help()
     uart_puts("ls    - list files in initramfs.\n");
     uart_puts("cat   - display file content (usage: cat <filename>).\n");
     uart_puts("test  - run memory allocator test.\n");
+    uart_puts("exec  - load a user program from initrd and run it in U-mode.\n");
 }
 void command_hello()
 {
@@ -146,6 +154,29 @@ void command_cat(void)
     cpio_cat(cpio_addr, p);
 }
 
+
+void command_exec(void)
+{
+    /* Find the filename after "cat " */
+    const char *p = buffer;
+    while (*p && *p != ' ')
+        p++; /* skip "cat" */
+    if (*p == '\0')
+    { /* command only "cat", without filename*/
+        uart_puts("Usage: exec <filename>\n");
+        return;
+    }
+
+    if (*p == ' ')
+        p++; /* skip the space */
+    if (*p == '\0')
+    { /* command only "cat ", without filename*/
+        uart_puts("Usage: exec <filename>\n");
+        return;
+    }
+    run_user_program(p);
+}
+
 static void command_test(void)
 {
     uart_puts("Testing memory allocation...\n");
@@ -204,6 +235,74 @@ static void command_test(void)
     uart_puts("=== Memory allocation test done ===\n");
 }
 
+/** ----------------------------------------------------------------------
+ * @brief byte_copy() – Tiny byte-wise memcpy used to load user programs.
+ *
+ * The kernel does not link against libc, so a minimal copy helper lives
+ * here to stage prog.bin from the cpio archive into a kmalloc()'d buffer.
+ * @param dst Destination buffer (must be writable).
+ * @param src Source bytes (may overlap forbidden).
+ * @param n   Number of bytes to copy.
+ * -------------------------------------------------------------------- */
+static void byte_copy(void *dst, const void *src, unsigned long n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    while (n--) {
+        *d++ = *s++;
+    }
+}
+
+/** ----------------------------------------------------------------------
+ * @brief run_user_program() – Load a file from initrd and drop into U-mode.
+ *
+ * Looks up @name inside the cpio archive, copies it into a fresh kmalloc
+ * region sized for both the code and a 16 KiB user stack, then calls
+ * enter_user_mode() which does not return. The shell regains control only
+ * through a trap (printed by trap_handler) followed by sret back to the
+ * program.
+ * @param name Filename inside the initial ramdisk (e.g. "prog.bin").
+ * -------------------------------------------------------------------- */
+static void run_user_program(const char *name)
+{
+    const void *initrd = (const void *)dtb_getprop("/chosen", "linux,initrd-start", NULL);
+    if (!initrd) {
+        uart_puts("exec: initrd not found\n");
+        return;
+    }
+
+    const void *src = NULL;
+    unsigned long src_size = 0;
+    if (cpio_find(initrd, name, &src, &src_size) != 0) {
+        uart_puts("exec: ");
+        uart_puts((char *)name);
+        uart_puts(": not found\n");
+        return;
+    }
+
+    unsigned long total = src_size + USER_STACK_SIZE;
+    void *buf = kmalloc(total);
+    if (!buf) {
+        uart_puts("exec: out of memory\n");
+        return;
+    }
+    byte_copy(buf, src, src_size);
+
+    uintptr_t entry   = (uintptr_t)buf;
+    uintptr_t user_sp = ((uintptr_t)buf + total) & ~0xfUL;
+
+    uart_puts("[exec] entry=");
+    uart_hex(entry);
+    uart_puts(" sp=");
+    uart_hex(user_sp);
+    uart_puts(" size=");
+    uart_dec(src_size);
+    uart_puts("\n");
+
+    trap_set_user_base(entry);
+    enter_user_mode(entry, user_sp);
+}
+
 void cmp_command()
 {
     if (!strcmp(buffer, "help"))
@@ -220,6 +319,8 @@ void cmp_command()
         command_test();
     else if (buffer[0] == 'c' && buffer[1] == 'a' && buffer[2] == 't' && (buffer[3] == ' ' || buffer[3] == '\0'))
         command_cat();
+    else if (buffer[0] == 'e' && buffer[1] == 'x' && buffer[2] == 'e' && buffer[3] == 'c' && (buffer[4] == ' ' || buffer[4] == '\0'))
+        command_exec();
     else
         command_unknown();
 }

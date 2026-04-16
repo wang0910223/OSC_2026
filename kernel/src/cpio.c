@@ -1,6 +1,7 @@
 #include "../include/cpio.h"
 #include "../include/uart.h"
 #include "../include/utils.h"
+#include "../include/dtb.h"
 
 #define CPIO_HEADER_SIZE 110  /* Fixed size of newc header */
 
@@ -159,4 +160,59 @@ void cpio_cat(void *cpio_addr, const char *filename)
     uart_puts("cat: file not found: ");
     uart_puts((char *)filename);
     uart_puts("\n");
+}
+/** ----------------------------------------------------------------------
+ * @brief cpio_find() – Locate a file inside an SVR4 newc cpio archive.
+ *
+ * Mirrors cpio_cat()'s traversal logic but, instead of printing, returns
+ * a pointer to the payload and its size via out-parameters. The caller
+ * is responsible for copying the bytes out before the archive is freed
+ * or overwritten.
+ * @param archive Base of the cpio blob.
+ * @param target  NUL-terminated filename to look up.
+ * @param data    Out: pointer to payload bytes inside the archive.
+ * @param size    Out: payload size in bytes.
+ * @return 0 on success, -1 otherwise.
+ * -------------------------------------------------------------------- */
+int cpio_find(const void *archive, const char *target,
+              const void **data, unsigned long *size)
+{
+    if (!archive || !target || !data || !size) {
+        return -1;
+    }
+
+    const char *ptr = (const char *)cpio_addr;
+    while (1) {
+        const struct cpio_newc_header *hdr = (const struct cpio_newc_header *)ptr;
+
+        /* Validate magic */
+        if (hdr->c_magic[0] != '0' ||
+            hdr->c_magic[1] != '7' ||
+            hdr->c_magic[2] != '0' ||
+            hdr->c_magic[3] != '7') {
+            uart_puts("[cpio] bad magic, stopping\n");
+            break;
+        }
+
+        unsigned long namesize = hex_to_ul(hdr->c_namesize, 8);
+        unsigned long filesize = hex_to_ul(hdr->c_filesize, 8);
+
+        const char *filename = ptr + sizeof(struct cpio_newc_header);
+
+        if (!strcmp(filename, "TRAILER!!!")) {
+            return -1;
+        }
+
+        unsigned long file_data = align4((unsigned long)filename + namesize);
+
+        if (!strcmp(filename, target)) {
+            *data = (const void *)file_data;
+            *size = filesize;
+            return 0;
+        }
+
+        unsigned long next_hdr = align4(file_data + filesize);
+        ptr = (const char *)next_hdr;
+    }
+    return -1;
 }

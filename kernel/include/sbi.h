@@ -15,4 +15,6 @@ struct sbires sbi_ecall(int ext,
     unsigned long arg4,
     unsigned long arg5);
 
+void sbi_set_timer(unsigned long stime_value);
+
 #endif
