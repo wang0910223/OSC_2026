@@ -31,7 +31,7 @@ void core_timer_enable(void) {
     asm volatile("csrs sie, %0" :: "r"(SIE_STIE));
 
     // 4. Set the SIE bit in sstatus to enable global interrupts.
-    asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));
+    // asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));
     
     uart_puts("[Timer] Core timer generated.\n");
 }

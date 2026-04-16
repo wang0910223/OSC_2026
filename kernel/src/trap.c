@@ -5,6 +5,8 @@
 #include "types.h"
 #include "timer.h"
 
+#include "plic.h"
+
 _Static_assert(sizeof(struct trap_frame) == TF_SIZE,
                "struct trap_frame size must match TF_SIZE in trap.h");
 
@@ -51,8 +53,22 @@ void trap_handler(struct trap_frame *tf)
     uintptr_t cause = tf->scause;
 
     if (cause & SCAUSE_INTR_BIT) {
-        if ((cause & ~SCAUSE_INTR_BIT) == INTR_S_TIMER) {
+        uintptr_t irq = cause & ~SCAUSE_INTR_BIT;
+        if (irq == INTR_S_TIMER) {
             core_timer_handler();
+        } else if (irq == INTR_S_EXT) {
+            /* S-mode External Interrupt (PLIC) */
+            int plic_irq = plic_claim();
+            if (plic_irq == UART0_IRQ) {
+                uart_interrupt_handler();
+            } else if (plic_irq) {
+                uart_puts("Unhandled PLIC IRQ: ");
+                uart_dec(plic_irq);
+                uart_puts("\n");
+            }
+            if (plic_irq) {
+                plic_complete(plic_irq);
+            }
         }
         return;
     }

@@ -6,6 +6,8 @@
 #include "trap.h"
 #include "kmalloc.h"
 #include "timer.h"
+#include "plic.h"
+#include "riscv.h"
 
 int boot_hart_id;
 
@@ -16,28 +18,22 @@ void main(int hart_id, void *dtb_ptr)
     /* Step 1: Register the DTB address so the parser can use it. */
     dtb_set_addr(dtb_ptr);
 
-    /* Step 2: Resolve UART base address from the devicetree.
-     *  OrangePi RV2 : /soc/serial
-     *      we can use "dtc -I dtb -O dts -o x1_orangepi-rv2.dts x1_orangepi-rv2.dtb" to check the info in dts format
-     *  QEMU virt    : /soc/serial  (node name "serial@10000000")
-     */
+    /* Step 2: Resolve UART base address from the devicetree. */
     unsigned long u_base = dtb_get_reg("/soc/serial");
     if (u_base == 0)
         u_base = dtb_get_reg("/soc/uart");
 
-    /* Step 3: Override the UART driver's base address before first use. */
+    /* Step 3: Override the UART driver's base address before first use.
+     * At this point uart_puts uses synchronous polling (no IRQ yet). */
     uart_set_base((unsigned long)u_base);
-    /* Resolve initrd address and print the address*/
     dtb_load_initrd_addr();
 
 #ifdef DEBUG
-    /* Print the address of DTB and UART */
     uart_puts("\ndtb base=");
     uart_hex((unsigned long)dtb_ptr);
     uart_puts("\nUART base=");
     uart_hex((unsigned long)u_base);
     uart_puts("\n");
-
     uart_puts("\ninitrd base=");
     uart_hex((unsigned long)cpio_addr);
 #endif
@@ -50,10 +46,24 @@ void main(int hart_id, void *dtb_ptr)
     /* Step 5: Initialize the dynamic memory allocator (chunk pools). */
     kmalloc_init();
 
+    /* Step 6: Install trap vector BEFORE enabling any interrupts. */
     trap_init();
     uart_puts("[Trap] stvec installed.\n");
 
+    /* Step 7: Start core timer. */
     core_timer_enable();
+
+    /* Step 8: Now safe to initialize PLIC and switch UART to async mode.
+     * The trap vector is already pointing at our handler,
+     * so any UART IRQ that fires will be caught correctly. */
+     
+    plic_init();
+    uart_intr_enable();
+
+    /* Step 9: Open global S-mode interrupts (timer + external). */
+    asm volatile("csrs sie, %0" :: "r"(SIE_SEIE));
+    asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));
+    uart_puts("[PLIC] UART0 interrupt routing enabled.\n");
 
     shell();
 
