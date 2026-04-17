@@ -7,6 +7,7 @@
 #include "types.h"
 #include "trap.h"
 #include "kmalloc.h"
+#include "timer.h"
 
 #define BOOT_MAGIC 0x544F4F42UL
 
@@ -54,6 +55,7 @@ void command_help()
     uart_puts("cat   - display file content (usage: cat <filename>).\n");
     uart_puts("test  - run memory allocator test.\n");
     uart_puts("exec  - load a user program from initrd and run it in U-mode.\n");
+    uart_puts("setTimeout - <sec> <msg> schedule a delayed message.\n");
 }
 void command_hello()
 {
@@ -303,6 +305,78 @@ static void run_user_program(const char *name)
     enter_user_mode(entry, user_sp);
 }
 
+struct timeout_arg {
+    int duration_sec;
+    unsigned long exec_time;
+    char msg[128]; // max buffer limit of shell
+};
+
+static void timeout_cb(void *arg) {
+    struct timeout_arg *targ = (struct timeout_arg *)arg;
+    unsigned long current_time = get_cycles() / get_timer_freq();
+    
+    uart_puts("\n[setTimeout] ");
+    uart_puts(targ->msg);
+    uart_puts("\n - Set at: ");
+    uart_dec(targ->exec_time);
+    uart_puts("s\n - Now: ");
+    uart_dec(current_time);
+    uart_puts("s\n - Expected delay: ");
+    uart_dec(targ->duration_sec);
+    uart_puts("s\n");
+    
+    kfree(targ);
+}
+
+void command_setTimeout(void) {
+    const char *p = buffer;
+    while (*p && *p != ' ') p++;
+    if (*p == '\0') {
+        uart_puts("Usage: setTimeout <seconds> <message>\n");
+        return;
+    }
+    p++; // skip space
+    while (*p == ' ') p++;
+    
+    int sec = 0;
+    if (!(*p >= '0' && *p <= '9')) {
+        uart_puts("Usage: setTimeout <seconds> <message>\n");
+        return;
+    }
+    while (*p >= '0' && *p <= '9') {
+        sec = sec * 10 + (*p - '0');
+        p++;
+    }
+    
+    if (*p != ' ') {
+        uart_puts("Usage: setTimeout <seconds> <message>\n");
+        return;
+    }
+    while (*p == ' ') p++; // skip space
+    
+    if (*p == '\0') {
+        uart_puts("Usage: setTimeout <seconds> <message>\n");
+        return;
+    }
+    
+    struct timeout_arg *arg = (struct timeout_arg *)kmalloc(sizeof(struct timeout_arg));
+    if (!arg) {
+        uart_puts("kmalloc failed for setTimeout\n");
+        return;
+    }
+    
+    arg->duration_sec = sec;
+    arg->exec_time = get_cycles() / get_timer_freq();
+    
+    int i = 0;
+    while (*p && i < 127) {
+        arg->msg[i++] = *p++;
+    }
+    arg->msg[i] = '\0';
+    
+    add_timer(timeout_cb, arg, sec);
+}
+
 void cmp_command()
 {
     if (!strcmp(buffer, "help"))
@@ -321,6 +395,10 @@ void cmp_command()
         command_cat();
     else if (buffer[0] == 'e' && buffer[1] == 'x' && buffer[2] == 'e' && buffer[3] == 'c' && (buffer[4] == ' ' || buffer[4] == '\0'))
         command_exec();
+    else if (buffer[0] == 's' && buffer[1] == 'e' && buffer[2] == 't' && buffer[3] == 'T' 
+          && buffer[4] == 'i' && buffer[5] == 'm' && buffer[6] == 'e' && buffer[7] == 'o' 
+          && buffer[8] == 'u' && buffer[9] == 't' && (buffer[10] == ' ' || buffer[10] == '\0'))
+        command_setTimeout();
     else
         command_unknown();
 }

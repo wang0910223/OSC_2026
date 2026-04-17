@@ -154,8 +154,9 @@ void *kmalloc(unsigned long size)
     /* Pop one chunk from the free list. */
     chunk_node_t *chunk = pool->free_list;
     pool->free_list = chunk->next;
-
+#ifdef DEBUG
     log_chunk_alloc((uintptr_t)chunk, pool->chunk_size);
+#endif
     return (void *)chunk;
 }
 
@@ -184,6 +185,7 @@ void kfree(void *ptr)
     chunk_node_t *node = (chunk_node_t *)ptr;
     node->next = pool->free_list;
     pool->free_list = node;
-
+#ifdef DEBUG
     log_chunk_free(addr, pool->chunk_size);
+#endif
 }
