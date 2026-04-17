@@ -8,6 +8,7 @@
 #include "trap.h"
 #include "kmalloc.h"
 #include "timer.h"
+#include "task.h"
 
 #define BOOT_MAGIC 0x544F4F42UL
 
@@ -56,6 +57,7 @@ void command_help()
     uart_puts("test  - run memory allocator test.\n");
     uart_puts("exec  - load a user program from initrd and run it in U-mode.\n");
     uart_puts("setTimeout - <sec> <msg> schedule a delayed message.\n");
+    uart_puts("testTask - test task prioritization and preemption.\n");
 }
 void command_hello()
 {
@@ -377,6 +379,23 @@ void command_setTimeout(void) {
     add_timer(timeout_cb, arg, sec);
 }
 
+static void test_task_cb(void *arg) {
+    uart_puts("[Task] Executing Priority ");
+    uart_puts((char*)arg);
+    uart_puts("\n");
+}
+
+void command_testTask(void) {
+    uart_puts("Queueing priority tasks (1, 5, 3)...\n");
+    add_task(test_task_cb, "1", 1);
+    add_task(test_task_cb, "5", 5);
+    add_task(test_task_cb, "3", 3);
+    
+    /* They will be executed in priority order: 5 -> 3 -> 1 */
+    uart_puts("Tasks queued! Running them now:\n");
+    run_tasks();
+}
+
 void cmp_command()
 {
     if (!strcmp(buffer, "help"))
@@ -399,6 +418,8 @@ void cmp_command()
           && buffer[4] == 'i' && buffer[5] == 'm' && buffer[6] == 'e' && buffer[7] == 'o' 
           && buffer[8] == 'u' && buffer[9] == 't' && (buffer[10] == ' ' || buffer[10] == '\0'))
         command_setTimeout();
+    else if (!strcmp(buffer, "testTask"))
+        command_testTask();
     else
         command_unknown();
 }

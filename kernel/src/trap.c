@@ -4,6 +4,7 @@
 #include "utils.h"
 #include "types.h"
 #include "timer.h"
+#include "task.h"
 
 #include "plic.h"
 
@@ -70,6 +71,10 @@ void trap_handler(struct trap_frame *tf)
                 plic_complete(plic_irq);
             }
         }
+        
+        /* Process decouple/deferred tasks before exiting trap handler */
+        run_tasks();
+        
         return;
     }
 
