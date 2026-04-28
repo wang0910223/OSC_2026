@@ -9,6 +9,7 @@
 #include "types.h"
 #include "uart.h"
 #include "utils.h"
+#include "thread.h"
 
 #define BOOT_MAGIC 0x544F4F42UL
 
@@ -19,12 +20,12 @@
 #endif // QEMU
 
 typedef enum {
-  BACK_SPACE = 8,
-  LINE_FEED = 10,
-  CARRIAGE_RETURN = 13,
-  DELETE = 127,
-  UNKNOWN = 512,
-  REGULAR_INPUT = 513,
+	BACK_SPACE = 8,
+	LINE_FEED = 10,
+	CARRIAGE_RETURN = 13,
+	DELETE = 127,
+	UNKNOWN = 512,
+	REGULAR_INPUT = 513,
 } SPECIAL_CHAR;
 
 #define BUFFER_SIZE 128
@@ -35,14 +36,14 @@ static void run_user_program(const char *name);
 #define USER_STACK_SIZE (16 * 1024) /* 16 KiB user stack for prog.bin */
 
 SPECIAL_CHAR parse(char c) {
-  if (c > 127 || c < 0)
-    return UNKNOWN;
-  if (c == DELETE || c == BACK_SPACE)
-    return DELETE;
-  if (c == CARRIAGE_RETURN || c == LINE_FEED)
-    return LINE_FEED;
+	if (c > 127 || c < 0)
+		return UNKNOWN;
+	if (c == DELETE || c == BACK_SPACE)
+		return DELETE;
+	if (c == CARRIAGE_RETURN || c == LINE_FEED)
+		return LINE_FEED;
 
-  return REGULAR_INPUT;
+	return REGULAR_INPUT;
 }
 void command_help() {
   uart_puts("help  - show all commands.\n");
@@ -54,6 +55,7 @@ void command_help() {
   uart_puts("exec  - load a user program from initrd and run it in U-mode.\n");
   uart_puts("setTimeout - <sec> <msg> schedule a delayed message.\n");
   uart_puts("testTask - test task prioritization and preemption.\n");
+  uart_puts("testThread - test thread creation and context switch.\n");
 }
 void command_hello() { uart_puts("Hello World!\n"); }
 void command_info() {
@@ -439,6 +441,8 @@ void cmp_command() {
     command_testTask();
   else if (!strcmp(buffer, "testNest"))
     command_testNest();
+  else if (!strcmp(buffer, "testThread"))
+    test_threads();
   else
     command_unknown();
 }
