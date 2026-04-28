@@ -22,6 +22,7 @@ ifeq ($(DEBUG), 1)
 endif
 
 build: clean
+	$(MAKE) initramfs.cpio
 	$(CC) $(CFLAGS) -c src/*.S src/*.c
 	$(LD) -T $(LDSCRIPT) -o $(TARGET).elf *.o
 	$(OBJCOPY) -O binary $(TARGET).elf $(TARGET).bin
@@ -31,4 +32,20 @@ run: build $(TARGET).bin
 	$(QEMU) -M virt -m 8G -kernel $(TARGET).bin -initrd initramfs.cpio -display none -serial stdio
 
 clean:
-	rm -f $(TARGET).bin $(TARGET).elf *.o *.bin kernel *.fit
+	rm -f $(TARGET).bin $(TARGET).elf *.o kernel *.fit
+	rm -rf rootfs initramfs.cpio
+
+rootfs/hello.txt:
+	mkdir -p rootfs
+	echo "Hello world from initramfs!" > rootfs/hello.txt
+
+# Stage the pre-built user program into rootfs/ so it ends up inside
+# the initramfs cpio archive. prog.bin is committed in the kernel/ tree.
+rootfs/prog.bin: prog.bin
+	mkdir -p rootfs
+	cp prog.bin rootfs/prog.bin
+
+initramfs.cpio: rootfs/hello.txt rootfs/prog.bin
+	cd rootfs && find . | cpio -o -H newc > ../initramfs.cpio
+
+

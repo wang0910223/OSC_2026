@@ -26,4 +26,12 @@ struct sbires sbi_ecall(int ext,
     return ret;
 }
 
+void sbi_set_timer(unsigned long stime_value) {
+    struct sbires res = sbi_ecall(0x54494D45, 0, stime_value, 0, 0, 0, 0, 0);
+    if (res.error != 0) {
+        /* Fallback for Vendor OpenSBI implementations lacking the Standard TIME Extension */
+        sbi_ecall(0, 0, stime_value, 0, 0, 0, 0, 0);
+    }
+}
+
 
