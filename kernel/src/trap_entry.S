@@ -20,15 +20,15 @@
 .align 2                            /* stvec direct mode: 4-byte aligned */
 trap_entry:
     /* Swap sp with sscratch so sp points at the kernel stack. */
+    /* 把 sp 換成存在 sscratch 中的 kernel stack */
     csrrw sp, sscratch, sp
-    beqz  sp, .Lfrom_kernel
+    beqz  sp, .Lfrom_kernel   /* 如果 sscratch 裡面是 0 代表 nested trap，跳到對應處理 label */
 
 .Lsave_context:
     /* Reserve a trap_frame on the kernel stack and save GPRs. */
-    addi  sp, sp, -TF_SIZE
+    addi  sp, sp, -TF_SIZE    /* 在 Stack 往下開一個 256 bytes 的空間，存所有暫存器的值 */
 
-    sd    x1,  TF_RA(sp)
-    /* x2 (sp) is stashed below from the old sscratch value. */
+    sd    x1,  TF_RA(sp)      /* store 所有 trap 發生當下的暫存器值到 kernel stack 上保存 */
     sd    x3,  TF_GP(sp)
     sd    x4,  TF_TP(sp)
     sd    x5,  TF_T0(sp)
@@ -60,10 +60,11 @@ trap_entry:
     sd    x31, TF_T6(sp)
 
     /* sscratch currently holds the user sp captured at entry. */
-    csrr  t0, sscratch
-    sd    t0, TF_SP(sp)
+    csrr  t0, sscratch    # 把剛剛存在 sscratch 裡的 sp 讀出來
+    sd    t0, TF_SP(sp)   # 把 sp push 進 trap frame
+
     /* Mark "currently in kernel" for any nested trap check later. */
-    csrw  sscratch, zero
+    csrw  sscratch, zero  
 
     /* Save the four supervisor CSRs that describe the trap. */
     csrr  t0, sepc
@@ -119,14 +120,20 @@ trap_entry:
 
     /* Load saved sp into t0 before freeing the frame, 
        then check SPP in sstatus to decide sscratch value. */
-    ld    t0, TF_SP(sp)
+    ld    t0, TF_SP(sp)     # load trap 前的 sp 進 t0 
     ld    t1, TF_SSTATUS(sp)
-    addi  sp, sp, TF_SIZE
+    addi  sp, sp, TF_SIZE   # 釋放 Trap Frame 空間
 
+
+    /* 檢查 SPP (sstatus 的第 8 個 bit) */
     li    t2, (1 << 8)
     and   t2, t1, t2
-    bnez  t2, .Lret_to_s
+    bnez  t2, .Lret_to_s    # 如果 SPP 是 1 (不為 0)，代表要返回 S-mode
 
+    /* CPU 準備執行 sret 回去，所以需要決定 sscratch 該設定成什麼 
+     * 若 SPP = 1  -> Smode  (sscratch 設為 0)
+     * 若 SPP = 0  -> Smode  (sscratch 設為 kernel stack)
+     */
 .Lret_to_u:
     csrw  sscratch, sp
     j     .Lfinish_ret
@@ -135,7 +142,7 @@ trap_entry:
     csrw  sscratch, zero
 
 .Lfinish_ret:
-    mv    sp, t0
+    mv    sp, t0   # 把 trap 前的 sp 存回 sp，sret 回去
     sret
 
 .Lfrom_kernel:
@@ -144,9 +151,9 @@ trap_entry:
      * Restore sp, keep a copy in sscratch temporarily so .Lsave_context
      * can pick it up correctly.
      */
-    csrrw sp, sscratch, sp
-    csrw  sscratch, sp
-    j     .Lsave_context
+    csrrw sp, sscratch, sp   /* 再交換一次 sp, sscratch，讓 sp 指向 kernel stack */
+    csrw  sscratch, sp       /* 把 kernel sp 也存到 sscratch，下次 trap 回來時 sscratch 裡面就會是正確的位置 */
+    j     .Lsave_context     /* 回到一般的 save context flow */
 
 
 /* ------------------------------------------------------------------ */
@@ -156,15 +163,23 @@ trap_entry:
 .align 2
 enter_user_mode:
     /* Remember the current kernel sp for the eventual U→S trap. */
+    /* 當前 Kernel sp 備份到 sscratch 這個 S-mode 專用的暫存器裡 當 user mode 發生中斷進入 s mode 時可以將 sp 換回來*/
     csrw  sscratch, sp
 
-    /* Program the return PC. */
+    /* Program the return PC. spec (Supervisor Exception Program Counter) */
+    /* 執行返回指令時，會執行 spec 中的位置 */
     csrw  sepc, a0
 
     /* Clear SPP bit (sstatus[8]) so sret returns to U-mode. */
+    /* sstatus 暫存器裡的第 8 個 bit 是 SPP (Supervisor Previous Privilege) */
+    /* csrc 會把這個 bit 清 0。代表前一個狀態是處於 U-mode (0)，稍後的返回指令就會把權限降級成 U-mode */
     li    t0, (1 << 8)
     csrc  sstatus, t0
+
+
     /* Set SPIE bit (sstatus[5]) so SIE becomes 1 after sret. */
+    /* sstatus 暫存器裡的第 5 個 bit 是 SPIE (Supervisor Interrupt Enable) */
+    /* csrs 會把這個 bit 設為 1。代表進入 U-mode後允許中斷 */
     li    t0, (1 << 5)
     csrs  sstatus, t0
 
@@ -187,4 +202,8 @@ enter_user_mode:
     li    t5, 0
     li    t6, 0
 
+    /* sret 會做三件事：
+     * 讀取 sstatus 的 SPP，發現是 0，於是把當前 CPU 權限拔除降為 U-mode。
+     * 把 sstatus 的 SPIE 複製給 SIE，開啟中斷。
+     * 讀取 sepc 的位址，把 PC 指向那裡，開始執行user program */
     sret

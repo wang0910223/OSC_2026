@@ -61,8 +61,8 @@ void main(int hart_id, void *dtb_ptr)
     uart_intr_enable();
 
     /* Step 9: Open global S-mode interrupts (timer + external). */
-    asm volatile("csrs sie, %0" :: "r"(SIE_SEIE));
-    asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));
+    asm volatile("csrs sie, %0" :: "r"(SIE_SEIE));   //  enable external, 9th bit
+    asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));   // enable global interrupt
     uart_puts("[PLIC] UART0 interrupt routing enabled.\n");
 
     shell();
