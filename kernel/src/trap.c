@@ -5,8 +5,10 @@
 #include "types.h"
 #include "uart.h"
 #include "utils.h"
+#include "syscall.h"
 
 #include "plic.h"
+#include "thread.h"
 
 _Static_assert(sizeof(struct trap_frame) == TF_SIZE,
                "struct trap_frame size must match TF_SIZE in trap.h");
@@ -91,6 +93,18 @@ void trap_handler(struct trap_frame *tf) {
         return;
     }
 
+    if (cause == EXC_ECALL_U) {
+        /* Skip the ecall instruction (always 4 bytes in RV64I). 
+         * 必須在 syscall_handler 之前跳過 ecall，否則 fork 複製 trap frame 時
+         * child 的 sepc 會指回 ecall，導致無限 fork。
+         */
+        tf->sepc += 4;
+        // Update current task's trap frame pointer so syscall handlers can use it
+        get_current()->tf = tf;
+        syscall_handler(tf);
+        return;
+    }
+
     /*
     * Display sepc as an offset from the user program base so that
     * students can correlate it with the prog.bin disassembly without
@@ -109,38 +123,10 @@ void trap_handler(struct trap_frame *tf) {
     uart_dec(tf->stval);
     uart_puts("\n");
 
-    if (cause == EXC_ECALL_U) {
-        /* Skip the ecall instruction (always 4 bytes in RV64I). 
-         * return 前要手動跳過 ecall 這條指令，否則會無限 ecall
-         */
-        tf->sepc += 4;
-        return;
-    }
-
     uart_puts("[trap] unhandled exception, halting.\n");
     for (;;) {
         asm volatile("wfi");
     }
 }
 
-/** ----------------------------------------------------------------------
- * @brief kernel_trap_panic() – Fatal handler for S→S traps in Ex1.
- *
- * Basic Ex1 does not expect any trap to be taken while the kernel is
- * already running. If one occurs, the assembly trampoline jumps here
- * so that the operator sees a clear message before the hart spins.
- * -------------------------------------------------------------------- */
-void kernel_trap_panic(void) {
-    uintptr_t scause, sepc, stval;
-    asm volatile("csrr %0, scause" : "=r"(scause));
-    asm volatile("csrr %0, sepc" : "=r"(sepc));
-    asm volatile("csrr %0, stval" : "=r"(stval));
 
-    uart_puts("[trap] kernel-mode trap! scause=0x");
-    uart_hex(scause);
-    uart_puts(" sepc=0x");
-    uart_hex(sepc);
-    uart_puts(" stval=0x");
-    uart_hex(stval);
-    uart_puts("\n");
-}

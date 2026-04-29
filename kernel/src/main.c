@@ -8,6 +8,7 @@
 #include "timer.h"
 #include "plic.h"
 #include "riscv.h"
+#include "thread.h"
 
 int boot_hart_id;
 
@@ -65,7 +66,17 @@ void main(int hart_id, void *dtb_ptr)
     asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));   // enable global interrupt
     uart_puts("[PLIC] UART0 interrupt routing enabled.\n");
 
-    shell();
+    // shell();
+
+    // Bootstrap: create idle task for current context (main), set tp
+    struct task_struct *idle_thread = thread_create(idle);
+    asm volatile("mv tp, %0" : : "r"(idle_thread));
+
+    // Create shell as a separate thread
+    thread_create(shell);
+
+    // main becomes the idle loop
+    idle();
 
     return;
 }

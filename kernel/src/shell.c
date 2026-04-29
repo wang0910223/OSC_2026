@@ -244,46 +244,51 @@ static void byte_copy(void *dst, const void *src, unsigned long n) {
  * -------------------------------------------------------------------- */
 static void run_user_program(const char *name) {
   // parsing dtb to get initrd address
-  const void *initrd =
-      (const void *)dtb_getprop("/chosen", "linux,initrd-start", NULL);
-  if (!initrd) {
-    uart_puts("exec: initrd not found\n");
-    return;
-  }
+  // const void *initrd =
+  //     (const void *)dtb_getprop("/chosen", "linux,initrd-start", NULL);
+  // if (!initrd) {
+  //   uart_puts("exec: initrd not found\n");
+  //   return;
+  // }
 
-  const void *src = NULL;
-  unsigned long src_size = 0;
+  // const void *src = NULL;
+  // unsigned long src_size = 0;
 
-  // parsing cpio to find the file
-  if (cpio_find(initrd, name, &src, &src_size) != 0) {
-    uart_puts("exec: ");
-    uart_puts((char *)name);
-    uart_puts(": not found\n");
-    return;
-  }
+  // // parsing cpio to find the file
+  // if (cpio_find(initrd, name, &src, &src_size) != 0) {
+  //   uart_puts("exec: ");
+  //   uart_puts((char *)name);
+  //   uart_puts(": not found\n");
+  //   return;
+  // }
 
-  // allocate memory for user program
-  unsigned long total = src_size + USER_STACK_SIZE;
-  void *buf = kmalloc(total);
-  if (!buf) {
-    uart_puts("exec: out of memory\n");
-    return;
-  }
-  byte_copy(buf, src, src_size);
+  // // allocate memory for user program
+  // unsigned long total = src_size + USER_STACK_SIZE;
+  // void *buf = kmalloc(total);
+  // if (!buf) {
+  //   uart_puts("exec: out of memory\n");
+  //   return;
+  // }
+  // byte_copy(buf, src, src_size);
 
-  uintptr_t entry = (uintptr_t)buf;
-  uintptr_t user_sp = ((uintptr_t)buf + total) & ~0xfUL;
+  // uintptr_t entry = (uintptr_t)buf;
+  // uintptr_t user_sp = ((uintptr_t)buf + total) & ~0xfUL;
 
-  uart_puts("[exec] entry=");
-  uart_hex(entry);
-  uart_puts(" sp=");
-  uart_hex(user_sp);
-  uart_puts(" size=");
-  uart_dec(src_size);
-  uart_puts("\n");
+  // uart_puts("[exec] entry=");
+  // uart_hex(entry);
+  // uart_puts(" sp=");
+  // uart_hex(user_sp);
+  // uart_puts(" size=");
+  // uart_dec(src_size);
+  // uart_puts("\n");
 
-  trap_set_user_base(entry);
-  enter_user_mode(entry, user_sp);
+  // trap_set_user_base(entry);
+  // enter_user_mode(entry, user_sp);
+
+  int child_id = process_execute(name);
+  do_waitpid(child_id);
+  // schedule();
+  // thread_exit();
 }
 
 struct timeout_arg {
@@ -490,8 +495,10 @@ void shell() {
 
   // for continue receive new char
   while (1) {
+    asm volatile("csrs sstatus, 2");
     c = uart_getc();
     s = parse(c);
     put_char(s, c);
+    // schedule();
   }
 }

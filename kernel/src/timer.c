@@ -96,7 +96,7 @@ void core_timer_enable(void) {
   uart_puts("[Timer] Core timer generated.\n");
 
   // Start the periodic boot time timer using software timer multiplexer
-  add_timer(boot_time_cb, NULL, 2);
+//   add_timer(boot_time_cb, NULL, 2);
 }
 
 void core_timer_handler(void) {
