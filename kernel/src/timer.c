@@ -4,6 +4,7 @@
 #include "sbi.h"
 #include "types.h"
 #include "uart.h"
+#include "thread.h"
 
 #ifdef QEMU
 #define SYS_CLOCK_FREQ 10000000
@@ -35,7 +36,7 @@ unsigned long get_cycles(void) {
 	return cycles;
 }
 
-void add_timer(timer_callback_t callback, void *arg, int sec) {
+void add_timer_ticks(timer_callback_t callback, void *arg, unsigned long ticks) {
     struct timer_event *new_event = (struct timer_event *)kmalloc(sizeof(struct timer_event));
 	if (!new_event) {
 		uart_puts("add_timer: kmalloc failed\n");
@@ -43,30 +44,20 @@ void add_timer(timer_callback_t callback, void *arg, int sec) {
 	}
 
 	/* fill the info. to struct timer_event */
-	new_event->expire_cycles = get_cycles() + (unsigned long)sec * SYS_CLOCK_FREQ;
+	new_event->expire_cycles = get_cycles() + ticks;
 	new_event->callback = callback;
 	new_event->arg = arg;
 	new_event->next = NULL;
 
 	/* Critical section start */
-	/* 因為接下來要修改 timer_head 的指標，所以需要進入 Critical section 以保護 list 結構
-	 * 方法：
-	 *   sstatus 暫存器的第 1 個 bit (值為 2) 是 SIE (Supervisor Interrupt Enable)，也就是 S-mode 的中斷總開關。
-	 *   csrrci 指令會先把目前的 sstatus 暫存器狀態備份到 saved_sstatus，然後強制關閉中斷。
-	 */
 	unsigned long saved_sstatus;
 	asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
 
-	/* 找 new event 插入 list 的位置 */
-
-	// case head: 如果 list 是空的，或Deadline 比目前的 head 還要早 -> insert to head and set timer
 	if (!timer_head || new_event->expire_cycles < timer_head->expire_cycles) {
 		new_event->next = timer_head;
 		timer_head = new_event;
-		/* Program hardware timer to the nearest deadline */
 		sbi_set_timer(timer_head->expire_cycles);
 	} 
-	// case not head: traverse list to find the position
 	else {
 		struct timer_event *curr = timer_head;
 		while (curr->next && curr->next->expire_cycles <= new_event->expire_cycles) {
@@ -77,8 +68,11 @@ void add_timer(timer_callback_t callback, void *arg, int sec) {
 	}
 
 	/* Critical section end */
-	// 把中斷開關恢復成剛才備份的狀態
 	asm volatile("csrs sstatus, %0" ::"r"(saved_sstatus & 2));
+}
+
+void add_timer(timer_callback_t callback, void *arg, int sec) {
+    add_timer_ticks(callback, arg, (unsigned long)sec * SYS_CLOCK_FREQ);
 }
 
 static void boot_time_cb(void *arg) {
@@ -90,10 +84,20 @@ static void boot_time_cb(void *arg) {
   add_timer(boot_time_cb, NULL, 2);
 }
 
+static void preempt_callback(void *arg) {
+    // Re-register for the next 1/32 second
+    add_timer_ticks(preempt_callback, NULL, SYS_CLOCK_FREQ / 32);
+    // Give up CPU
+    schedule();
+}
+
 void core_timer_enable(void) {
   // 1. Set the STIE bit in the sie register to enable timer interrupts.
   asm volatile("csrs sie, %0" ::"r"(SIE_STIE));
   uart_puts("[Timer] Core timer generated.\n");
+
+  // Start the periodic preemption timer (1/32 second)
+  add_timer_ticks(preempt_callback, NULL, SYS_CLOCK_FREQ / 32);
 
   // Start the periodic boot time timer using software timer multiplexer
 //   add_timer(boot_time_cb, NULL, 2);

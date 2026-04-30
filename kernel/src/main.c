@@ -9,8 +9,20 @@
 #include "plic.h"
 #include "riscv.h"
 #include "thread.h"
+#include "video.h"
+#include "bird.h"
 
 int boot_hart_id;
+
+void video_animation_thread() {
+    while (1) {
+        for (int i = 0; i < FRAME_COUNT; i++) {
+            video_bmp_display(&FRAME_PIXEL(i, 0, 0), FRAME_WIDTH, FRAME_HEIGHT);
+            for (int j = 0; j < 500000; j++) asm volatile("nop");
+            schedule();
+        }
+    }
+}
 
 void main(int hart_id, void *dtb_ptr)
 {
@@ -39,7 +51,8 @@ void main(int hart_id, void *dtb_ptr)
     uart_hex((unsigned long)cpio_addr);
 #endif
 
-    uart_puts("\nKernel Starting...\n\n");
+    /* Step 3.5: Initialize Video (reserve FB memory if needed) */
+    video_init();
 
     /* Step 4: Initialize the buddy page-frame allocator. */
     buddy_init();
@@ -65,7 +78,7 @@ void main(int hart_id, void *dtb_ptr)
     asm volatile("csrs sie, %0" :: "r"(SIE_SEIE));   //  enable external, 9th bit
     asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));   // enable global interrupt
     uart_puts("[PLIC] UART0 interrupt routing enabled.\n");
-
+    
     // shell();
 
     // Bootstrap: create idle task for current context (main), set tp
@@ -74,6 +87,9 @@ void main(int hart_id, void *dtb_ptr)
 
     // Create shell as a separate thread
     thread_create(shell);
+
+    // Create video animation thread
+    thread_create(video_animation_thread);
 
     // main becomes the idle loop
     idle();

@@ -66,8 +66,6 @@ struct task_struct* get_current() {
     return current;
 }
 
-
-
 void schedule() {
     unsigned long saved_sstatus;
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
@@ -240,28 +238,25 @@ int do_exec(const char *path) {
 
 /* Trampoline: called when a newly-created user process thread is scheduled
  * for the first time. Reads entry/sp from task_struct and drops to U-mode. */
-static void user_process_trampoline() {
+static void user_program_start() {
     struct task_struct *curr = get_current();
     uintptr_t entry   = curr->user_stack_base;
     uintptr_t user_sp = (curr->user_stack_base + curr->user_stack_size) & ~0xfUL;
     
-    extern void trap_set_user_base(uintptr_t base);
-    trap_set_user_base(entry);
-    
     enter_user_mode(entry, user_sp); // Does not return; executes sret into U-mode
 }
 
-int process_execute(const char *path) {
+int user_program_execute(const char *path) {
     const void *initrd = (const void *)dtb_getprop("/chosen", "linux,initrd-start", NULL);
     if (!initrd) {
-        uart_puts("process_execute: initrd not found\n");
+        uart_puts("user_program_execute: initrd not found\n");
         return -1;
     }
     
     const void *src = NULL;
     unsigned long src_size = 0;
     if (cpio_find(initrd, path, &src, &src_size) != 0) {
-        uart_puts("process_execute: ");
+        uart_puts("user_program_execute: ");
         uart_puts((char *)path);
         uart_puts(": not found\n");
         return -1;
@@ -270,15 +265,15 @@ int process_execute(const char *path) {
     unsigned long total = src_size + 16 * 1024; // 16 KiB user stack
     void *buf = kmalloc(total);
     if (!buf) {
-        uart_puts("process_execute: out of memory\n");
+        uart_puts("user_program_execute: out of memory\n");
         return -1;
     }
     byte_copy(buf, src, src_size);
     
-    // thread_create sets ra = user_process_trampoline, so when the scheduler
-    // first picks this task, it calls user_process_trampoline() which drops
+    // thread_create sets ra = user_program_start, so when the scheduler
+    // first picks this task, it calls user_program_start() which drops
     // into U-mode via enter_user_mode().
-    struct task_struct *task = thread_create(user_process_trampoline);
+    struct task_struct *task = thread_create(user_program_start);
     task->ppid = get_current()->pid; // Set parent PID so do_waitpid can reap it
     task->user_stack_base = (unsigned long)buf;
     task->user_stack_size = total;
@@ -342,7 +337,6 @@ long do_fork(struct trap_frame *tf) {
 long do_waitpid(long pid) {
     while (1) {
         int found = 0;
-        int is_zombie = 0;
         struct task_struct *curr = run_queue;
         struct task_struct* par = get_current();
 
@@ -354,14 +348,12 @@ long do_waitpid(long pid) {
                 if (curr->pid == pid) {
                     found = 1;
                     if (curr->state == THREAD_ZOMBIE) {
-                        uart_puts("waitpid: ");
-                        uart_dec(par->pid);
-                        uart_puts(" found zombie ");
-                        uart_dec(curr->pid);
-                        uart_puts("\n");
-                        is_zombie = 1;
+                        // uart_puts("waitpid: ");
+                        // uart_dec(par->pid);
+                        // uart_puts(" found zombie ");
+                        // uart_dec(curr->pid);
+                        // uart_puts("\n");
 
-                        // 找到殭屍小孩了！親自收屍！
                         dequeue(&run_queue, curr);
                         if (curr->user_stack_base) {
                             kfree((void *)curr->user_stack_base);
@@ -377,14 +369,13 @@ long do_waitpid(long pid) {
                 curr = curr->next;
             } while (curr != run_queue);
         }
+
         asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 
-        if (!found) return -1; // Process not found
-        if (is_zombie) {
-            // Process finished
-            return pid;
-        }
+        // child process not found
+        if (!found) return -1; 
         
+        // Found the child process but not zombie, schedule other process
         schedule();
     }
 }

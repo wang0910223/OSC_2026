@@ -37,7 +37,7 @@ struct task_struct* thread_create(void (*threadfn)());
 void thread_exit();
 void schedule();
 
-int process_execute(const char *path);
+int user_program_execute(const char *path);
 int do_exec(const char *path);
 long do_fork(struct trap_frame *tf);
 long do_waitpid(long pid);

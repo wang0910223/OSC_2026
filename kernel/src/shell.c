@@ -215,22 +215,7 @@ static void command_test(void) {
   uart_puts("=== Memory allocation test done ===\n");
 }
 
-/** ----------------------------------------------------------------------
- * @brief byte_copy() – Tiny byte-wise memcpy used to load user programs.
- *
- * The kernel does not link against libc, so a minimal copy helper lives
- * here to stage prog.bin from the cpio archive into a kmalloc()'d buffer.
- * @param dst Destination buffer (must be writable).
- * @param src Source bytes (may overlap forbidden).
- * @param n   Number of bytes to copy.
- * -------------------------------------------------------------------- */
-static void byte_copy(void *dst, const void *src, unsigned long n) {
-  unsigned char *d = (unsigned char *)dst;
-  const unsigned char *s = (const unsigned char *)src;
-  while (n--) {
-    *d++ = *s++;
-  }
-}
+
 
 /** ----------------------------------------------------------------------
  * @brief run_user_program() – Load a file from initrd and drop into U-mode.
@@ -243,49 +228,8 @@ static void byte_copy(void *dst, const void *src, unsigned long n) {
  * @param name Filename inside the initial ramdisk (e.g. "prog.bin").
  * -------------------------------------------------------------------- */
 static void run_user_program(const char *name) {
-  // parsing dtb to get initrd address
-  // const void *initrd =
-  //     (const void *)dtb_getprop("/chosen", "linux,initrd-start", NULL);
-  // if (!initrd) {
-  //   uart_puts("exec: initrd not found\n");
-  //   return;
-  // }
 
-  // const void *src = NULL;
-  // unsigned long src_size = 0;
-
-  // // parsing cpio to find the file
-  // if (cpio_find(initrd, name, &src, &src_size) != 0) {
-  //   uart_puts("exec: ");
-  //   uart_puts((char *)name);
-  //   uart_puts(": not found\n");
-  //   return;
-  // }
-
-  // // allocate memory for user program
-  // unsigned long total = src_size + USER_STACK_SIZE;
-  // void *buf = kmalloc(total);
-  // if (!buf) {
-  //   uart_puts("exec: out of memory\n");
-  //   return;
-  // }
-  // byte_copy(buf, src, src_size);
-
-  // uintptr_t entry = (uintptr_t)buf;
-  // uintptr_t user_sp = ((uintptr_t)buf + total) & ~0xfUL;
-
-  // uart_puts("[exec] entry=");
-  // uart_hex(entry);
-  // uart_puts(" sp=");
-  // uart_hex(user_sp);
-  // uart_puts(" size=");
-  // uart_dec(src_size);
-  // uart_puts("\n");
-
-  // trap_set_user_base(entry);
-  // enter_user_mode(entry, user_sp);
-
-  int child_id = process_execute(name);
+  int child_id = user_program_execute(name);
   do_waitpid(child_id);
   // schedule();
   // thread_exit();
