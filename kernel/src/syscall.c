@@ -1,8 +1,10 @@
 #include "../include/syscall.h"
 #include "../include/uart.h"
 #include "../include/thread.h"
+#include "../include/video.h"
 
 void syscall_handler(struct trap_frame *tf) {
+    asm volatile("csrs sstatus, 2");
     long syscall_num = tf->a7;
     long ret = -1;
 
@@ -17,13 +19,13 @@ void syscall_handler(struct trap_frame *tf) {
             long bytes_read = 0;
             /* RISC-V 進 Trap 時硬體自動清 sstatus.SIE，
              * 必須在這裡重新打開，UART 中斷才能填 rx buffer */
-            asm volatile("csrs sstatus, 2"); // SIE = 1
+            // asm volatile("csrs sstatus, 2"); // SIE = 1
             for (long i = 0; i < count; i++) {
                 char c = uart_getc();
                 buf[i] = c;
                 bytes_read++;
             }
-            asm volatile("csrc sstatus, 2"); // SIE = 0
+            // asm volatile("csrc sstatus, 2"); // SIE = 0
             ret = bytes_read;
             break;
         }
@@ -31,10 +33,12 @@ void syscall_handler(struct trap_frame *tf) {
             const char *buf = (const char *)tf->a0;
             long count = tf->a1;
             long bytes_written = 0;
+            // asm volatile("csrs sstatus, 2"); // SIE = 1
             for (long i = 0; i < count; i++) {
                 uart_putc(buf[i]);
                 bytes_written++;
             }
+            // asm volatile("csrc sstatus, 2"); // SIE = 0
             ret = bytes_written;
             break;
         }
@@ -63,6 +67,19 @@ void syscall_handler(struct trap_frame *tf) {
         case SYS_stop: {
             long pid = tf->a0;
             ret = do_kill(pid);
+            break;
+        }
+        case SYS_display: {
+            unsigned int *bmp_image = (unsigned int *)tf->a0;
+            unsigned int width = (unsigned int)tf->a1;
+            unsigned int height = (unsigned int)tf->a2;
+            video_bmp_display(bmp_image, width, height);
+            ret = 0;
+            break;
+        }
+        case SYS_usleep: {
+            unsigned int usec = (unsigned int)tf->a0;
+            ret = do_usleep(usec);
             break;
         }
         default:

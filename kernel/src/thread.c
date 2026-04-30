@@ -76,7 +76,7 @@ void schedule() {
     // uart_puts("  ");    
     struct task_struct* next = prev->next;
 
-    while (next->state == THREAD_ZOMBIE && next != prev) {
+    while (next->state != THREAD_RUNNING && next != prev) {
         next = next->next;
     }
 
@@ -118,9 +118,40 @@ void thread_exit() {
     while (1);  // Just in case accidentally return
 }
 
+// void kill_zombies() {
+//     if (!run_queue) return;
+
+//     unsigned long saved_sstatus;
+//     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+    
+//     struct task_struct* curr = run_queue;
+//     do {
+//         struct task_struct* next = curr->next;
+//         if (next->state == THREAD_ZOMBIE && next->ppid == 0) {
+//             // uart_puts("kill_zombies: pid ");
+           
+//             // uart_dec(next->pid);
+//             // uart_puts("\n");
+//             dequeue(&run_queue, next);
+//             kfree((void*)next->stack);
+//             kfree(next);
+//             curr = run_queue;
+//             if (!curr) break;
+//             continue;
+//         }
+//         curr = curr->next;
+//     } while (curr != run_queue);
+
+//     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
+// }
 void kill_zombies() {
     if (!run_queue) return;
 
+    struct task_struct* zombie_to_free = NULL; // 準備用來裝被拔出來的殭屍
+
+    // ==========================================
+    // 1. 進入 Critical Section (保護 Queue 的遍歷與拔除)
+    // ==========================================
     unsigned long saved_sstatus;
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
     
@@ -128,27 +159,35 @@ void kill_zombies() {
     do {
         struct task_struct* next = curr->next;
         if (next->state == THREAD_ZOMBIE && next->ppid == 0) {
-            uart_puts("kill_zombies: pid ");
-           
-            uart_dec(next->pid);
-            uart_puts("\n");
-            dequeue(&run_queue, next);
-            kfree((void*)next->stack);
-            kfree(next);
-            curr = run_queue;
-            if (!curr) break;
-            continue;
+            
+            dequeue(&run_queue, next); // 從 Queue 中安全拔除
+            zombie_to_free = next;     // 記錄下來
+            
+            break; // 找到一個就立刻中斷迴圈，縮短關中斷的時間！
         }
         curr = curr->next;
     } while (curr != run_queue);
 
+    // ==========================================
+    // 2. 離開 Critical Section (恢復中斷，讓 Timer 可以進來)
+    // ==========================================
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
-}
 
+    // ==========================================
+    // 3. 在中斷開啟的狀態下，慢慢做耗時的記憶體釋放
+    // ==========================================
+    if (zombie_to_free) {
+        // 這個時候 zombie_to_free 已經不在 run_queue 裡了
+        // 所以就算 Timer 中斷進來，也不會讀到它，非常安全！
+        kfree((void*)zombie_to_free->stack);
+        kfree(zombie_to_free);
+    }
+}
 void idle() {
     while (1) {
         kill_zombies();
         schedule();
+        // asm volatile("wfi"); // 讓 CPU 進入低功耗休眠
     }
 }
 
@@ -393,4 +432,24 @@ int do_kill(long pid) {
     } while (curr != run_queue);
     
     return -1;
+}
+static void wakeup_callback(void *arg) {
+    struct task_struct *task = (struct task_struct *)arg;
+    task->state = THREAD_RUNNING;
+    schedule();
+}
+
+
+int do_usleep(unsigned int usec) {
+    struct task_struct *curr = get_current();
+    curr->state = THREAD_SLEEPING;
+    
+    // Calculate ticks. freq is ticks per second.
+    // ticks = usec * freq / 1000000
+    unsigned long ticks = ((unsigned long)usec * get_timer_freq()) / 1000000;
+    if (ticks == 0) ticks = 1; // Sleep at least one tick if usec is very small
+    
+    add_timer_ticks(wakeup_callback, curr, ticks);
+    schedule();
+    return 0;
 }

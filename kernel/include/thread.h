@@ -2,12 +2,14 @@
 #define __THREAD_H__
 
 #include "trap.h"
+#include "timer.h"
 
 #define STACK_SIZE 4096
 
 enum thread_state {
     THREAD_RUNNING,
     THREAD_ZOMBIE,
+    THREAD_SLEEPING,
 };
 
 struct task_struct {
@@ -42,5 +44,6 @@ int do_exec(const char *path);
 long do_fork(struct trap_frame *tf);
 long do_waitpid(long pid);
 int do_kill(long pid);
+int do_usleep(unsigned int usec);
 
 #endif /* __THREAD_H__ */

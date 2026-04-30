@@ -20,6 +20,7 @@ void video_animation_thread() {
             video_bmp_display(&FRAME_PIXEL(i, 0, 0), FRAME_WIDTH, FRAME_HEIGHT);
             for (int j = 0; j < 500000; j++) asm volatile("nop");
             schedule();
+            // do_usleep(50000);
         }
     }
 }
@@ -89,7 +90,7 @@ void main(int hart_id, void *dtb_ptr)
     thread_create(shell);
 
     // Create video animation thread
-    thread_create(video_animation_thread);
+    // thread_create(video_animation_thread);
 
     // main becomes the idle loop
     idle();

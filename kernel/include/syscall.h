@@ -11,6 +11,8 @@
 #define SYS_waitpid 5
 #define SYS_exit 6
 #define SYS_stop 7
+#define SYS_display 8
+#define SYS_usleep 9
 
 void syscall_handler(struct trap_frame *tf);
 
