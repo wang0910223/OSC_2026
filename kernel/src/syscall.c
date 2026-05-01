@@ -4,7 +4,7 @@
 #include "../include/video.h"
 
 void syscall_handler(struct trap_frame *tf) {
-    asm volatile("csrs sstatus, 2");
+    // asm volatile("csrs sstatus, 2");
     long syscall_num = tf->a7;
     long ret = -1;
 
@@ -13,19 +13,20 @@ void syscall_handler(struct trap_frame *tf) {
             ret = get_current()->pid;
             break;
         case SYS_uart_read: {
-            // uart_puts("SYS_uart_read called\n");
             char *buf = (char *)tf->a0;
             long count = tf->a1;
             long bytes_read = 0;
-            /* RISC-V 進 Trap 時硬體自動清 sstatus.SIE，
-             * 必須在這裡重新打開，UART 中斷才能填 rx buffer */
-            // asm volatile("csrs sstatus, 2"); // SIE = 1
+            
+            unsigned long saved_sstatus;
+            asm volatile("csrr %0, sstatus" : "=r"(saved_sstatus));
+            asm volatile("csrs sstatus, 2");
             for (long i = 0; i < count; i++) {
                 char c = uart_getc();
                 buf[i] = c;
                 bytes_read++;
             }
-            // asm volatile("csrc sstatus, 2"); // SIE = 0
+            asm volatile("csrw sstatus, %0" :: "r"(saved_sstatus));
+
             ret = bytes_read;
             break;
         }
@@ -33,12 +34,16 @@ void syscall_handler(struct trap_frame *tf) {
             const char *buf = (const char *)tf->a0;
             long count = tf->a1;
             long bytes_written = 0;
-            // asm volatile("csrs sstatus, 2"); // SIE = 1
+
+            unsigned long saved_sstatus;
+            asm volatile("csrr %0, sstatus" : "=r"(saved_sstatus));
+            asm volatile("csrs sstatus, 2");
             for (long i = 0; i < count; i++) {
                 uart_putc(buf[i]);
                 bytes_written++;
             }
-            // asm volatile("csrc sstatus, 2"); // SIE = 0
+            asm volatile("csrw sstatus, %0" :: "r"(saved_sstatus));
+
             ret = bytes_written;
             break;
         }
@@ -53,20 +58,16 @@ void syscall_handler(struct trap_frame *tf) {
         case SYS_waitpid: {
             long pid = tf->a0;
             ret = do_waitpid(pid);
-            uart_puts("waitpid end\n");
             break;
         }
         case SYS_exit: {
-            uart_puts("exit syscall: pid ");
-            uart_dec(get_current()->pid);
-            uart_puts("\n");
-            // int status = tf->a0; (not required to handle)
             thread_exit(); // Doesn't return
             break;
         }
         case SYS_stop: {
+            
             long pid = tf->a0;
-            ret = do_kill(pid);
+            ret = do_stop(pid);
             break;
         }
         case SYS_display: {

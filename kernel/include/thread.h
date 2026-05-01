@@ -27,8 +27,8 @@ struct task_struct {
     struct task_struct* next;
     
     // User process specific
-    unsigned long user_stack_base;
-    unsigned long user_stack_size;
+    unsigned long user_space_base;
+    unsigned long user_space_size;
     struct trap_frame *tf;
 };
 
@@ -43,7 +43,7 @@ int user_program_execute(const char *path);
 int do_exec(const char *path);
 long do_fork(struct trap_frame *tf);
 long do_waitpid(long pid);
-int do_kill(long pid);
+int do_stop(long pid);
 int do_usleep(unsigned int usec);
 
 #endif /* __THREAD_H__ */

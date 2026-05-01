@@ -23,7 +23,7 @@ switch_to:
 
     /* load next thread state */
     ld ra, 0(a1)        # load Return Address
-    ld sp, 8(a1)        # load Stack Pointer
+    ld sp, 8(a1)        # load Stack Pointer  
     ld s0, 16(a1)       # load Callee-saved registers s0-s11
     ld s1, 24(a1)
     ld s2, 32(a1)

@@ -71,9 +71,6 @@ void schedule() {
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
 
     struct task_struct* prev = get_current();
-    // uart_puts("schedule: prev->pid = ");
-    // uart_dec(prev->pid);
-    // uart_puts("  ");    
     struct task_struct* next = prev->next;
 
     while (next->state != THREAD_RUNNING && next != prev) {
@@ -81,20 +78,12 @@ void schedule() {
     }
 
     if (prev != next) {
-        // uart_puts("schedule: next->pid = ");
-        // uart_dec(next->pid);
-        // uart_puts("\n");   
         switch_to(prev, next);
     }
-    // asm volatile("csrs sstatus, 2");   // 重要！！解決第一
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 }
 
 void thread_exit() {
-
-    uart_puts("Thread exit: pid ");
-    uart_dec(get_current()->pid);
-    uart_puts("\n");    
 
     unsigned long saved_sstatus;
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
@@ -102,12 +91,12 @@ void thread_exit() {
     struct task_struct* current = get_current();
     current->state = THREAD_ZOMBIE;
 
-    // Reparenting：把所有以我為 ppid 的小孩，ppid 都改成 0
+    // Reparenting：把所有以此 thread 為 parent 的 thread 的 ppid 都改成 0
     if (run_queue) {
         struct task_struct *curr = run_queue;
         do {
             if (curr->ppid == current->pid) {
-                curr->ppid = 0; // 變成孤兒，以後交給 idle 處理
+                curr->ppid = 0; // turn this thread into orphan thread and handover to idle thread
             }
             curr = curr->next;
         } while (curr != run_queue);
@@ -118,40 +107,10 @@ void thread_exit() {
     while (1);  // Just in case accidentally return
 }
 
-// void kill_zombies() {
-//     if (!run_queue) return;
-
-//     unsigned long saved_sstatus;
-//     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
-    
-//     struct task_struct* curr = run_queue;
-//     do {
-//         struct task_struct* next = curr->next;
-//         if (next->state == THREAD_ZOMBIE && next->ppid == 0) {
-//             // uart_puts("kill_zombies: pid ");
-           
-//             // uart_dec(next->pid);
-//             // uart_puts("\n");
-//             dequeue(&run_queue, next);
-//             kfree((void*)next->stack);
-//             kfree(next);
-//             curr = run_queue;
-//             if (!curr) break;
-//             continue;
-//         }
-//         curr = curr->next;
-//     } while (curr != run_queue);
-
-//     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
-// }
 void kill_zombies() {
     if (!run_queue) return;
-
-    struct task_struct* zombie_to_free = NULL; // 準備用來裝被拔出來的殭屍
-
-    // ==========================================
-    // 1. 進入 Critical Section (保護 Queue 的遍歷與拔除)
-    // ==========================================
+    struct task_struct* zombie_to_free = NULL; 
+    
     unsigned long saved_sstatus;
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
     
@@ -160,25 +119,20 @@ void kill_zombies() {
         struct task_struct* next = curr->next;
         if (next->state == THREAD_ZOMBIE && next->ppid == 0) {
             
-            dequeue(&run_queue, next); // 從 Queue 中安全拔除
-            zombie_to_free = next;     // 記錄下來
+            dequeue(&run_queue, next);
+            zombie_to_free = next;   
             
-            break; // 找到一個就立刻中斷迴圈，縮短關中斷的時間！
+            break; // when found one, we stop traverse for shorten interrupt disable time
         }
         curr = curr->next;
     } while (curr != run_queue);
 
-    // ==========================================
-    // 2. 離開 Critical Section (恢復中斷，讓 Timer 可以進來)
-    // ==========================================
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 
-    // ==========================================
-    // 3. 在中斷開啟的狀態下，慢慢做耗時的記憶體釋放
-    // ==========================================
     if (zombie_to_free) {
-        // 這個時候 zombie_to_free 已經不在 run_queue 裡了
-        // 所以就算 Timer 中斷進來，也不會讀到它，非常安全！
+        if (zombie_to_free->user_space_base) {
+            kfree((void*)zombie_to_free->user_space_base);
+        }
         kfree((void*)zombie_to_free->stack);
         kfree(zombie_to_free);
     }
@@ -187,7 +141,6 @@ void idle() {
     while (1) {
         kill_zombies();
         schedule();
-        // asm volatile("wfi"); // 讓 CPU 進入低功耗休眠
     }
 }
 
@@ -196,9 +149,9 @@ struct task_struct* thread_create(void (*threadfn)()) {
     task->pid = nr_threads++;
     task->ppid = 0;
     task->state = THREAD_RUNNING;
-    task->stack = (unsigned long)kmalloc(STACK_SIZE);
+    task->stack = (unsigned long)kmalloc(STACK_SIZE);  // kernel stack
     task->thread.ra = (unsigned long)threadfn;
-    task->thread.sp = task->stack + STACK_SIZE;
+    task->thread.sp = task->stack + STACK_SIZE;   // kernel sp
     enqueue(&run_queue, task);
     return task;
 }
@@ -224,7 +177,7 @@ void test_threads() {
     for (int i = 0; i < 3; i++) {
         thread_create(foo);
     }
-    idle();
+    // idle();
     // schedule();
 }
 
@@ -237,6 +190,9 @@ static void byte_copy(void *dst, const void *src, unsigned long n) {
 }
 
 int do_exec(const char *path) {
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+
     struct task_struct *curr = get_current();
     
     const void *initrd = (const void *)dtb_getprop("/chosen", "linux,initrd-start", NULL);
@@ -254,12 +210,12 @@ int do_exec(const char *path) {
     byte_copy(buf, src, src_size);
     
     // Free old user space if it exists
-    if (curr->user_stack_base) {
-        kfree((void *)curr->user_stack_base);
+    if (curr->user_space_base) {
+        kfree((void *)curr->user_space_base);
     }
     
-    curr->user_stack_base = (unsigned long)buf;
-    curr->user_stack_size = total;
+    curr->user_space_base = (unsigned long)buf;
+    curr->user_space_size = total;
     
     uintptr_t entry = (uintptr_t)buf;
     uintptr_t user_sp = ((uintptr_t)buf + total) & ~0xfUL;
@@ -267,20 +223,16 @@ int do_exec(const char *path) {
     // Update trap frame
     curr->tf->sepc = entry;
     curr->tf->sp = user_sp;
-    
-    // Set user mode base for debugging offsets in trap handler
-    extern void trap_set_user_base(uintptr_t base);
-    trap_set_user_base(entry);
-    
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
+
     return 0;
 }
 
-/* Trampoline: called when a newly-created user process thread is scheduled
- * for the first time. Reads entry/sp from task_struct and drops to U-mode. */
+
 static void user_program_start() {
     struct task_struct *curr = get_current();
-    uintptr_t entry   = curr->user_stack_base;
-    uintptr_t user_sp = (curr->user_stack_base + curr->user_stack_size) & ~0xfUL;
+    uintptr_t entry   = curr->user_space_base;
+    uintptr_t user_sp = (curr->user_space_base + curr->user_space_size) & ~0xfUL;
     
     enter_user_mode(entry, user_sp); // Does not return; executes sret into U-mode
 }
@@ -314,8 +266,8 @@ int user_program_execute(const char *path) {
     // into U-mode via enter_user_mode().
     struct task_struct *task = thread_create(user_program_start);
     task->ppid = get_current()->pid; // Set parent PID so do_waitpid can reap it
-    task->user_stack_base = (unsigned long)buf;
-    task->user_stack_size = total;
+    task->user_space_base = (unsigned long)buf;
+    task->user_space_size = total;
     
     return task->pid;
 }
@@ -328,10 +280,10 @@ long do_fork(struct trap_frame *tf) {
     struct task_struct *child = thread_create(0); // 0 because we will overwrite context
     
     // Copy user stack
-    if (parent->user_stack_base) {
-        child->user_stack_base = (unsigned long)kmalloc(parent->user_stack_size);
-        child->user_stack_size = parent->user_stack_size;
-        byte_copy((void *)child->user_stack_base, (void *)parent->user_stack_base, parent->user_stack_size);
+    if (parent->user_space_base) {
+        child->user_space_base = (unsigned long)kmalloc(parent->user_space_size);
+        child->user_space_size = parent->user_space_size;
+        byte_copy((void *)child->user_space_base, (void *)parent->user_space_base, parent->user_space_size);
     }
 
     // record parent pid
@@ -344,21 +296,22 @@ long do_fork(struct trap_frame *tf) {
     
     // Child's fork() return value is 0
     child_tf->a0 = 0;
-
-    // CRITICAL: tp (x4) is used by get_current() in kernel mode.
-    // After _ret_from_fork, tp is restored from the trap frame.
-    // But trap_entry.S restores tp only to go to U-mode (user's tp).
-    // The actual kernel tp is set by switch_to via "mv tp, a1".
-    // So child's kernel tp is correctly set by switch_to when it picks the child.
-    // However, we must store the child's task_struct pointer into tp
-    // so that if the child ever calls get_current() while still in kernel context
-    // (e.g., during waitpid scheduling), it returns the correct task.
+    
     child_tf->tp = (unsigned long)child;
 
     // Adjust child's user stack pointer: same offset within child's allocation
-    if (parent->user_stack_base) {
-        unsigned long sp_offset = child_tf->sp - parent->user_stack_base;
-        child_tf->sp = child->user_stack_base + sp_offset;
+    if (parent->user_space_base) {
+        /* run on parent's memory */
+        // unsigned long sp_offset = child_tf->sp - parent->user_space_base;
+        // child_tf->sp = child->user_space_base + sp_offset;
+
+        /* run on child's memory */
+        unsigned long offset = child->user_space_base - parent->user_space_base;
+        child_tf->sp += offset;
+        child_tf->sepc += offset;
+        child_tf->s0 += offset;  
+        child_tf->gp += offset;  
+        child_tf->ra += offset;
     }
     
     // Set child's kernel thread context:
@@ -387,15 +340,10 @@ long do_waitpid(long pid) {
                 if (curr->pid == pid) {
                     found = 1;
                     if (curr->state == THREAD_ZOMBIE) {
-                        // uart_puts("waitpid: ");
-                        // uart_dec(par->pid);
-                        // uart_puts(" found zombie ");
-                        // uart_dec(curr->pid);
-                        // uart_puts("\n");
 
                         dequeue(&run_queue, curr);
-                        if (curr->user_stack_base) {
-                            kfree((void *)curr->user_stack_base);
+                        if (curr->user_space_base) {
+                            kfree((void *)curr->user_space_base);
                         }
                         kfree((void *)curr->stack);
                         kfree(curr);
@@ -419,7 +367,7 @@ long do_waitpid(long pid) {
     }
 }
 
-int do_kill(long pid) {
+int do_stop(long pid) {
     if (!run_queue) return -1;
     
     struct task_struct *curr = run_queue;
@@ -435,12 +383,18 @@ int do_kill(long pid) {
 }
 static void wakeup_callback(void *arg) {
     struct task_struct *task = (struct task_struct *)arg;
-    task->state = THREAD_RUNNING;
-    schedule();
+
+    if (task->state == THREAD_SLEEPING) {
+        task->state = THREAD_RUNNING;
+    }
 }
 
 
 int do_usleep(unsigned int usec) {
+    if (usec == 0) {
+        return -1;
+    }
+    
     struct task_struct *curr = get_current();
     curr->state = THREAD_SLEEPING;
     
