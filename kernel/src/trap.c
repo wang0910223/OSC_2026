@@ -89,6 +89,7 @@ void trap_handler(struct trap_frame *tf) {
 
         /* Process decouple/deferred tasks before exiting trap handler */
         run_tasks();
+        signal_check(tf); // dispatch any pending signal before returning to U-mode
 
         return;
     }
@@ -102,6 +103,7 @@ void trap_handler(struct trap_frame *tf) {
         // Update current task's trap frame pointer so syscall handlers can use it
         get_current()->tf = tf;
         syscall_handler(tf);
+        signal_check(tf); // dispatch any pending signal before returning to U-mode
         return;
     }
 

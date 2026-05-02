@@ -83,6 +83,24 @@ void syscall_handler(struct trap_frame *tf) {
             ret = do_usleep(usec);
             break;
         }
+        case SYS_signal: {
+            int sig = (int)tf->a0;
+            void (*handler)() = (void (*)())tf->a1;
+            do_signal(sig, handler);
+            ret = 0;
+            break;
+        }
+        case SYS_sigreturn: {
+            do_sigreturn(tf);
+            // do_sigreturn restores tf in-place; ret is already set inside it
+            return; // skip the tf->a0 = ret at the bottom
+        }
+        case SYS_kill: {
+            int pid = (int)tf->a0;
+            int sig = (int)tf->a1;
+            ret = do_kill(pid, sig);
+            break;
+        }
         default:
             uart_puts("Unknown syscall: ");
             uart_dec(syscall_num);

@@ -4,6 +4,8 @@
 #include "trap.h"
 #include "timer.h"
 
+#define SIGNAL_MAX 32
+
 #define STACK_SIZE 4096
 
 enum thread_state {
@@ -30,6 +32,13 @@ struct task_struct {
     unsigned long user_space_base;
     unsigned long user_space_size;
     struct trap_frame *tf;
+
+    // POSIX Signal
+    void (*signal_handlers[SIGNAL_MAX])();
+    unsigned int pending_signals;       // bitmask of pending signals
+    int is_handling_signal;
+    void *signal_stack;                 // temporary stack for handler
+    struct trap_frame signal_saved_tf;  // deep copy of original user context
 };
 
 void idle();
@@ -45,5 +54,11 @@ long do_fork(struct trap_frame *tf);
 long do_waitpid(long pid);
 int do_stop(long pid);
 int do_usleep(unsigned int usec);
+
+// Signal
+void do_signal(int sig, void (*handler)());
+int do_kill(int pid, int sig);
+void do_sigreturn(struct trap_frame *tf);
+void signal_check(struct trap_frame *tf);
 
 #endif /* __THREAD_H__ */

@@ -152,6 +152,14 @@ struct task_struct* thread_create(void (*threadfn)()) {
     task->stack = (unsigned long)kmalloc(STACK_SIZE);  // kernel stack
     task->thread.ra = (unsigned long)threadfn;
     task->thread.sp = task->stack + STACK_SIZE;   // kernel sp
+
+    // Initialize signal fields
+    for (int i = 0; i < SIGNAL_MAX; i++)
+        task->signal_handlers[i] = 0;
+    task->pending_signals = 0;
+    task->is_handling_signal = 0;
+    task->signal_stack = 0;
+
     enqueue(&run_queue, task);
     return task;
 }
@@ -321,6 +329,13 @@ long do_fork(struct trap_frame *tf) {
     child->thread.ra = (unsigned long)_ret_from_fork;
     child->thread.sp = (unsigned long)child_tf;
 
+    // Inherit parent's signal handlers
+    for (int i = 0; i < SIGNAL_MAX; i++)
+        child->signal_handlers[i] = parent->signal_handlers[i];
+    child->pending_signals = 0;  // don't inherit pending signals
+    child->is_handling_signal = 0;
+    child->signal_stack = 0;
+
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
     
     return child->pid;
@@ -406,4 +421,124 @@ int do_usleep(unsigned int usec) {
     add_timer_ticks(wakeup_callback, curr, ticks);
     schedule();
     return 0;
+}
+// -----------------------------------------------------------------------
+// POSIX Signal implementation
+// -----------------------------------------------------------------------
+
+void do_signal(int sig, void (*handler)()) {
+    if (sig < 0 || sig >= SIGNAL_MAX) return;
+    struct task_struct *curr = get_current();
+    curr->signal_handlers[sig] = handler;
+}
+
+int do_kill(int pid, int sig) {
+    if (sig < 0 || sig >= SIGNAL_MAX) return -1;
+    if (!run_queue) return -1;
+
+    struct task_struct *curr = run_queue;
+    do {
+        if (curr->pid == pid) {
+            if (curr->signal_handlers[sig]) {
+                // Registered handler: set the pending bit
+                curr->pending_signals |= (1u << sig);
+            } else {
+                // Default action: terminate the process
+                curr->state = THREAD_ZOMBIE;
+                curr->ppid = 0; // orphan -> idle will reap
+            }
+            return 0;
+        }
+        curr = curr->next;
+    } while (curr != run_queue);
+
+    return -1; // pid not found
+}
+
+void do_sigreturn(struct trap_frame *tf) {
+    struct task_struct *curr = get_current();
+
+    uart_puts("[sigreturn] signal handler finished, pid: ");
+    uart_dec(curr->pid);
+    uart_puts("\n");
+
+    // Restore original user context (deep copy back into the live trap frame)
+    byte_copy(tf, &curr->signal_saved_tf, sizeof(struct trap_frame));
+
+    // Free the temporary signal stack
+    if (curr->signal_stack) {
+        kfree(curr->signal_stack);
+        curr->signal_stack = 0;
+    }
+
+    curr->is_handling_signal = 0;
+    // tf is now pointing at the restored context; trap_handler returns normally
+    // and sret will resume the original user execution.
+}
+
+/*
+ * signal_check() – called by trap_handler before returning to U-mode.
+ *
+ * If there is a pending signal with a registered handler, redirect
+ * execution to the handler by modifying the live trap frame in-place.
+ * A small trampoline (li a7, SYS_sigreturn; ecall) is injected into the
+ * bottom of the newly allocated signal stack so the handler auto-calls
+ * sigreturn when it returns.
+ */
+void signal_check(struct trap_frame *tf) {
+    // Only act when returning to U-mode (SPP == 0)
+    if (tf->sstatus & (1UL << 8)) return;
+
+    struct task_struct *curr = get_current();
+    if (!curr->pending_signals) return;
+    if (curr->is_handling_signal) return;
+
+    // Find the lowest-numbered pending signal
+    int sig = -1;
+    for (int i = 0; i < SIGNAL_MAX; i++) {
+        if (curr->pending_signals & (1u << i)) {
+            sig = i;
+            break;
+        }
+    }
+    if (sig < 0) return;
+
+    void (*handler)() = curr->signal_handlers[sig];
+    if (!handler) {
+        // No registered handler: clear bit and terminate
+        curr->pending_signals &= ~(1u << sig);
+        curr->state = THREAD_ZOMBIE;
+        curr->ppid = 0;
+        return;
+    }
+
+    // Deep-copy the current trap frame so we can restore it in sigreturn
+    byte_copy(&curr->signal_saved_tf, tf, sizeof(struct trap_frame));
+
+    // Allocate a fresh stack for the handler
+    curr->signal_stack = kmalloc(STACK_SIZE);
+    curr->is_handling_signal = 1;
+    curr->pending_signals &= ~(1u << sig);
+
+    /*
+     * Inject the sigreturn trampoline at the bottom of the signal stack:
+     *   li   a7, 11          # SYS_sigreturn = 11  -> encoding: 0x00B00893
+     *   ecall                #                     -> encoding: 0x00000073
+     *
+     * Place it at stack_base so the user-mode handler returns to it via ra.
+     */
+    unsigned int *trampoline = (unsigned int *)curr->signal_stack;
+    trampoline[0] = 0x00B00893u; /* li a7, 11  */
+    trampoline[1] = 0x00000073u; /* ecall      */
+    unsigned long trampoline_addr = (unsigned long)trampoline;
+
+    // New user stack top: top of signal stack, 16-byte aligned
+    unsigned long new_sp = ((unsigned long)curr->signal_stack + STACK_SIZE) & ~0xfUL;
+
+    // Redirect trap frame to the handler
+    tf->sepc = (unsigned long)handler;
+    tf->sp   = new_sp;
+    tf->s0   = new_sp;   // frame pointer = sp for a fresh frame
+    tf->ra   = trampoline_addr;
+    tf->a0   = (unsigned long)sig;
 }
