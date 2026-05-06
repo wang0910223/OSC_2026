@@ -169,6 +169,7 @@ struct task_struct* thread_create(void (*threadfn)()) {
 }
 
 void foo() {
+    asm volatile("csrs sstatus, 2");
     for (int i = 0; i < 5; i++) {
         uart_puts("Thread id: ");
         uart_dec(get_current()->pid);
