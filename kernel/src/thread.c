@@ -146,6 +146,10 @@ void idle() {
 
 struct task_struct* thread_create(void (*threadfn)()) {
     struct task_struct* task = kmalloc(sizeof(struct task_struct));
+    task->user_space_base = 0;
+    task->user_space_size = 0;
+    task->tf = 0;
+
     task->pid = nr_threads++;
     task->ppid = 0;
     task->state = THREAD_RUNNING;
@@ -186,7 +190,7 @@ void test_threads() {
         thread_create(foo);
     }
     // idle();
-    // schedule();
+    schedule();
 }
 
 static void byte_copy(void *dst, const void *src, unsigned long n) {
@@ -384,15 +388,26 @@ long do_waitpid(long pid) {
 
 int do_stop(long pid) {
     if (!run_queue) return -1;
+
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
     
     struct task_struct *curr = run_queue;
     do {
         if (curr->pid == pid) {
             curr->state = THREAD_ZOMBIE;
+
+            asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2)); 
+            
+            if (curr == get_current()) {
+                schedule(); 
+            }
             return 0;
         }
         curr = curr->next;
     } while (curr != run_queue);
+
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
     
     return -1;
 }
@@ -436,6 +451,9 @@ int do_kill(int pid, int sig) {
     if (sig < 0 || sig >= SIGNAL_MAX) return -1;
     if (!run_queue) return -1;
 
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+
     struct task_struct *curr = run_queue;
     do {
         if (curr->pid == pid) {
@@ -451,6 +469,8 @@ int do_kill(int pid, int sig) {
         }
         curr = curr->next;
     } while (curr != run_queue);
+
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 
     return -1; // pid not found
 }
@@ -487,6 +507,7 @@ void do_sigreturn(struct trap_frame *tf) {
  */
 void signal_check(struct trap_frame *tf) {
     // Only act when returning to U-mode (SPP == 0)
+    // signal can only happen in U-mode
     if (tf->sstatus & (1UL << 8)) return;
 
     struct task_struct *curr = get_current();
@@ -503,6 +524,7 @@ void signal_check(struct trap_frame *tf) {
     }
     if (sig < 0) return;
 
+
     void (*handler)() = curr->signal_handlers[sig];
     if (!handler) {
         // No registered handler: clear bit and terminate
@@ -515,7 +537,7 @@ void signal_check(struct trap_frame *tf) {
     // Deep-copy the current trap frame so we can restore it in sigreturn
     byte_copy(&curr->signal_saved_tf, tf, sizeof(struct trap_frame));
 
-    // Allocate a fresh stack for the handler
+    // Allocate a stack for the signal handler
     curr->signal_stack = kmalloc(STACK_SIZE);
     curr->is_handling_signal = 1;
     curr->pending_signals &= ~(1u << sig);
