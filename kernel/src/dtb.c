@@ -330,6 +330,9 @@ void dtb_get_memory_region(uintptr_t *start, uint64_t *size)
 {
     int len = 0;
     const void *prop = dtb_getprop("/memory", "reg", &len);
+    if (!prop) {
+        prop = dtb_getprop("/memory@0", "reg", &len);
+    }
     if (!prop || len < 4) {
         *start = 0;
         *size = 0;

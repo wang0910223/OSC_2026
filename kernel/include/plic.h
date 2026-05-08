@@ -1,11 +1,13 @@
 #ifndef __PLIC_H__
 #define __PLIC_H__
 
+#include "vm.h"
+
 #ifdef QEMU
-    #define PLIC_BASE       0x0c000000UL
+    #define PLIC_BASE       (0x0c000000UL + PAGE_OFFSET)
     #define UART0_IRQ       10
 #else
-    #define PLIC_BASE       0xe0000000UL
+    #define PLIC_BASE       (0xe0000000UL + PAGE_OFFSET)
     #define UART0_IRQ       42
 #endif
 

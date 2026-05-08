@@ -4,6 +4,7 @@
 #include "utils.h"
 #include "types.h"
 #include "dtb.h"
+#include "vm.h"
 
 /* ===== Frame Array ======================================================
  *
@@ -236,16 +237,30 @@ void buddy_init(void)
     uint64_t dtb_mem_size = 0;
     dtb_get_memory_region(&dtb_mem_start, &dtb_mem_size);
     if (dtb_mem_size == 0) {
-        /* Fallback for QEMU virt if devicetree fails */
-        uart_puts("Fallback for QEMU virt if devicetree fails\n");
+#ifdef QEMU
         dtb_mem_start = 0x80000000;
-        dtb_mem_size  = 0x10000000; /* 256MB */
+        dtb_mem_size  = 0x80000000; /* 2GB */
+#else
+        dtb_mem_start = 0x00000000;
+        dtb_mem_size  = 0x80000000; /* 2GB */
+#endif
     }
+#ifdef QEMU
+    if (dtb_mem_size > 0x80000000UL) {
+        dtb_mem_size = 0x80000000UL; /* Limit to 2GB to avoid unmapped memory accesses on QEMU */
+    }
+#else
+    if (dtb_mem_size > 0x80000000UL) {
+        dtb_mem_size = 0x80000000UL;  /* Limit to 2GB to avoid unmapped memory accesses on Board */
+    }
+#endif
     uart_puts("dtb_mem_start=");
     uart_hex(dtb_mem_start);
     uart_puts("\ndtb_mem_size=");
     uart_hex(dtb_mem_size);
     uart_puts("\n");
+
+    dtb_mem_start = (uintptr_t)__va(dtb_mem_start);
 
     buddy_base_addr = dtb_mem_start;
     buddy_end_addr = dtb_mem_start + dtb_mem_size;
@@ -253,6 +268,11 @@ void buddy_init(void)
 
     /* Reserve kernel regions explicitly */
     memory_reserve((uintptr_t)_start, (uintptr_t)_end - (uintptr_t)_start);
+
+    /* Reserve firmware/OpenSBI region from buddy_base_addr to _start */
+    if ((uintptr_t)_start > buddy_base_addr) {
+        memory_reserve(buddy_base_addr, (uintptr_t)_start - buddy_base_addr);
+    }
     
     if (dtb_addr)
         memory_reserve((uintptr_t)dtb_addr, dtb_get_totalsize());

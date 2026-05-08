@@ -3,6 +3,7 @@
 #include "utils.h"
 #include "uart.h"
 #include "buddy.h"
+#include "vm.h"
 
 #define XRGB8888  875713112
 
@@ -34,7 +35,7 @@ struct QEMU_PACKED RAMFBCfg {
     uint32_t stride;
 };
 
-#define FW_CFG_BASE   0x10100000UL
+#define FW_CFG_BASE   (PAGE_OFFSET + 0x10100000UL)
 #define FW_CFG_SELECT (uint16_t*)(FW_CFG_BASE + 0x08)
 #define FW_CFG_DATA   (uint64_t*)(FW_CFG_BASE + 0x00)
 #define FW_CFG_DMA    (uint64_t*)(FW_CFG_BASE + 0x10)
@@ -66,9 +67,9 @@ static void fw_cfg_dma_transfer(void* address,
     struct FWCfgDmaAccess access = {
         .control = bswap32(control),
         .length = bswap32(length),
-        .address = bswap64((uint64_t)address),
+        .address = bswap64((uint64_t)__pa(address)),
     };
-    *FW_CFG_DMA = bswap64((uint64_t)&access);
+    *FW_CFG_DMA = bswap64((uint64_t)__pa(&access));
     while (bswap32(access.control) & ~FW_CFG_DMA_CTL_ERROR)
         ;
 }
@@ -152,7 +153,7 @@ void video_init() {
 }
 
 void video_bmp_display(unsigned int* bmp_image, int width, int height) {
-    unsigned int* fb = (unsigned int*)FB_BASE;
+    unsigned int* fb = (unsigned int*)__va(FB_BASE);
     int start_x = (FB_WIDTH - width) / 2;
     int start_y = (FB_HEIGHT - height) / 2;
     for (int y = 0; y < height; y++) {

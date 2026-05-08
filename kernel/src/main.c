@@ -10,12 +10,15 @@
 #include "riscv.h"
 #include "thread.h"
 #include "video.h"
+#include "vm.h"
 
 int boot_hart_id;
 
 void main(int hart_id, void *dtb_ptr)
 {
     boot_hart_id = hart_id;
+
+    dtb_ptr = __va(dtb_ptr);
 
     /* Step 1: Register the DTB address so the parser can use it. */
     dtb_set_addr(dtb_ptr);
@@ -27,8 +30,37 @@ void main(int hart_id, void *dtb_ptr)
 
     /* Step 3: Override the UART driver's base address before first use.
      * At this point uart_puts uses synchronous polling (no IRQ yet). */
-    uart_set_base((unsigned long)u_base);
+    uart_set_base((unsigned long)__va(u_base));
+    uart_puts("Entered main!\n");
     dtb_load_initrd_addr();
+    if (cpio_addr)
+        cpio_addr = (char *)__va(cpio_addr);
+
+    drop_identity_map();
+        // 讀取 satp 控制暫存器
+    // unsigned long satp_val;
+    // asm volatile("csrr %0, satp" : "=r"(satp_val));
+
+    // uart_puts("\n[MMU Test] Current satp register value: ");
+    // uart_hex(satp_val);
+    // uart_puts("\n");
+
+    // // 解析 satp 欄位
+    // unsigned long mode = satp_val >> 60; // 取得最高 4 位的 MODE 欄位
+    // unsigned long ppn = satp_val & 0xfffffffffffUL; // 取得低位的分頁表實體頁框號 (PPN)
+
+    // if (mode == 8) {
+    //     uart_puts("[MMU Test] SUCCESS: MMU is actively running in Sv39 (3-level) mode!\n");
+    // } else if (mode == 0) {
+    //     uart_puts("[MMU Test] FAILED: MMU is turned off (Bare Mode).\n");
+    // } else {
+    //     uart_puts("[MMU Test] Running in another mode.\n");
+    // }
+
+    // uart_puts("[MMU Test] Root Page Table physical address (PPN * 4KB): ");
+    // uart_hex(ppn << 12);
+    // uart_puts("\n\n");
+
 
 #ifdef DEBUG
     uart_puts("\ndtb base=");
