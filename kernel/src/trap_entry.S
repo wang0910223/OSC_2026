@@ -79,7 +79,8 @@ trap_entry:
     /* Dispatch to C. */
     mv    a0, sp
     call  trap_handler
-
+.globl _ret_from_fork
+_ret_from_fork:
     /* Restore sepc / sstatus (scause / stval are read-only on return). */
     ld    t0, TF_SEPC(sp)
     ld    t1, TF_SSTATUS(sp)

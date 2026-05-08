@@ -23,3 +23,26 @@ int strcmp(const char *s1, const char *s2) {
     
     return 0;
 }
+int strncmp(const char *s1, const char *s2, int n) {
+    unsigned char c1, c2;
+
+    while (n > 0) {
+        c1 = *s1++;
+        c2 = *s2++;
+        if (c1 != c2)
+            return c1 - c2;
+        
+        if (!c1) break;
+        n--;
+    }
+    
+    return 0;
+}
+
+void *memcpy(void *dest, const void *src, int n) {
+    char *d = dest;
+    const char *s = src;
+    while (n--)
+        *d++ = *s++;
+    return dest;
+}

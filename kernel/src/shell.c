@@ -9,6 +9,7 @@
 #include "types.h"
 #include "uart.h"
 #include "utils.h"
+#include "thread.h"
 
 #define BOOT_MAGIC 0x544F4F42UL
 
@@ -19,12 +20,12 @@
 #endif // QEMU
 
 typedef enum {
-  BACK_SPACE = 8,
-  LINE_FEED = 10,
-  CARRIAGE_RETURN = 13,
-  DELETE = 127,
-  UNKNOWN = 512,
-  REGULAR_INPUT = 513,
+	BACK_SPACE = 8,
+	LINE_FEED = 10,
+	CARRIAGE_RETURN = 13,
+	DELETE = 127,
+	UNKNOWN = 512,
+	REGULAR_INPUT = 513,
 } SPECIAL_CHAR;
 
 #define BUFFER_SIZE 128
@@ -35,14 +36,14 @@ static void run_user_program(const char *name);
 #define USER_STACK_SIZE (16 * 1024) /* 16 KiB user stack for prog.bin */
 
 SPECIAL_CHAR parse(char c) {
-  if (c > 127 || c < 0)
-    return UNKNOWN;
-  if (c == DELETE || c == BACK_SPACE)
-    return DELETE;
-  if (c == CARRIAGE_RETURN || c == LINE_FEED)
-    return LINE_FEED;
+	if (c > 127 || c < 0)
+		return UNKNOWN;
+	if (c == DELETE || c == BACK_SPACE)
+		return DELETE;
+	if (c == CARRIAGE_RETURN || c == LINE_FEED)
+		return LINE_FEED;
 
-  return REGULAR_INPUT;
+	return REGULAR_INPUT;
 }
 void command_help() {
   uart_puts("help  - show all commands.\n");
@@ -54,6 +55,7 @@ void command_help() {
   uart_puts("exec  - load a user program from initrd and run it in U-mode.\n");
   uart_puts("setTimeout - <sec> <msg> schedule a delayed message.\n");
   uart_puts("testTask - test task prioritization and preemption.\n");
+  uart_puts("testThread - test thread creation and context switch.\n");
 }
 void command_hello() { uart_puts("Hello World!\n"); }
 void command_info() {
@@ -213,22 +215,8 @@ static void command_test(void) {
   uart_puts("=== Memory allocation test done ===\n");
 }
 
-/** ----------------------------------------------------------------------
- * @brief byte_copy() – Tiny byte-wise memcpy used to load user programs.
- *
- * The kernel does not link against libc, so a minimal copy helper lives
- * here to stage prog.bin from the cpio archive into a kmalloc()'d buffer.
- * @param dst Destination buffer (must be writable).
- * @param src Source bytes (may overlap forbidden).
- * @param n   Number of bytes to copy.
- * -------------------------------------------------------------------- */
-static void byte_copy(void *dst, const void *src, unsigned long n) {
-  unsigned char *d = (unsigned char *)dst;
-  const unsigned char *s = (const unsigned char *)src;
-  while (n--) {
-    *d++ = *s++;
-  }
-}
+
+
 
 /** ----------------------------------------------------------------------
  * @brief run_user_program() – Load a file from initrd and drop into U-mode.
@@ -237,51 +225,15 @@ static void byte_copy(void *dst, const void *src, unsigned long n) {
  * region sized for both the code and a 16 KiB user stack, then calls
  * enter_user_mode() which does not return. The shell regains control only
  * through a trap (printed by trap_handler) followed by sret back to the
- * program.
+ * program. 
  * @param name Filename inside the initial ramdisk (e.g. "prog.bin").
  * -------------------------------------------------------------------- */
 static void run_user_program(const char *name) {
-  // parsing dtb to get initrd address
-  const void *initrd =
-      (const void *)dtb_getprop("/chosen", "linux,initrd-start", NULL);
-  if (!initrd) {
-    uart_puts("exec: initrd not found\n");
-    return;
-  }
 
-  const void *src = NULL;
-  unsigned long src_size = 0;
-
-  // parsing cpio to find the file
-  if (cpio_find(initrd, name, &src, &src_size) != 0) {
-    uart_puts("exec: ");
-    uart_puts((char *)name);
-    uart_puts(": not found\n");
-    return;
-  }
-
-  // allocate memory for user program
-  unsigned long total = src_size + USER_STACK_SIZE;
-  void *buf = kmalloc(total);
-  if (!buf) {
-    uart_puts("exec: out of memory\n");
-    return;
-  }
-  byte_copy(buf, src, src_size);
-
-  uintptr_t entry = (uintptr_t)buf;
-  uintptr_t user_sp = ((uintptr_t)buf + total) & ~0xfUL;
-
-  uart_puts("[exec] entry=");
-  uart_hex(entry);
-  uart_puts(" sp=");
-  uart_hex(user_sp);
-  uart_puts(" size=");
-  uart_dec(src_size);
-  uart_puts("\n");
-
-  trap_set_user_base(entry);
-  enter_user_mode(entry, user_sp);
+  int child_id = user_program_execute(name);
+  do_waitpid(child_id);
+  // schedule();
+  // thread_exit();
 }
 
 struct timeout_arg {
@@ -377,39 +329,6 @@ void command_testTask(void) {
   run_tasks();
 }
 
-static void high_prio_task_cb(void *arg) {
-    uart_puts("\n[10] start\n");
-}
-
-static void timer_trigger_cb(void *arg) {
-    uart_puts("\n--- [10] insert  ---\n");
-    add_task(high_prio_task_cb, NULL, 10);
-}
-static void delay_sec(int sec) {
-    unsigned long target = get_cycles() + sec * get_timer_freq();
-    while (get_cycles() < target) {
-    }
-}
-static void low_prio_task_cb(void *arg) {
-    uart_puts("\n[low] start\n");
-    
-    add_timer(timer_trigger_cb, NULL, 2);
-
-    delay_sec(4);
-
-    uart_puts("\n[low] end\n");
-}
-void command_testNest(void) {
-	uart_puts("=== Nested interrupt test start ===\n");
-
-	// 先把低優先權任務丟進去
-	add_task(low_prio_task_cb, NULL, 1);
-
-	// 開始執行 Bottom Half
-	run_tasks();
-
-	uart_puts("\n=== Nested interrupt test end ===\n");
-}
 
 void cmp_command() {
   if (!strcmp(buffer, "help"))
@@ -437,8 +356,8 @@ void cmp_command() {
     command_setTimeout();
   else if (!strcmp(buffer, "testTask"))
     command_testTask();
-  else if (!strcmp(buffer, "testNest"))
-    command_testNest();
+  else if (!strcmp(buffer, "testThread"))
+    test_threads();
   else
     command_unknown();
 }
@@ -486,8 +405,10 @@ void shell() {
 
   // for continue receive new char
   while (1) {
+    asm volatile("csrs sstatus, 2");
     c = uart_getc();
     s = parse(c);
     put_char(s, c);
+    // schedule();
   }
 }

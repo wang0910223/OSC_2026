@@ -2,7 +2,7 @@ RISCV_GNU ?= riscv64-unknown-elf
 CC = $(RISCV_GNU)-gcc
 LD = $(RISCV_GNU)-ld
 OBJCOPY = $(RISCV_GNU)-objcopy
-CFLAGS = -mcmodel=medany -ffreestanding -nostdlib -g -Wall -I include -march=rv64gc_zifencei -mabi=lp64d
+CFLAGS = -mcmodel=medany -ffreestanding -nostdlib -g -Wall -I include -march=rv64gc_zifencei_zicbom -mabi=lp64d
 QEMU ?= qemu-system-riscv64
 TARGET = kernel
 
@@ -29,7 +29,7 @@ build: clean
 	mkimage -f kernel.its kernel.fit
 
 run: build $(TARGET).bin
-	$(QEMU) -M virt -m 8G -kernel $(TARGET).bin -initrd initramfs.cpio -display none -serial stdio
+	$(QEMU) -M virt -m 8G -kernel $(TARGET).bin -initrd initramfs.cpio -device ramfb -serial stdio
 
 clean:
 	rm -f $(TARGET).bin $(TARGET).elf *.o kernel *.fit
@@ -45,7 +45,11 @@ rootfs/prog.bin: prog.bin
 	mkdir -p rootfs
 	cp prog.bin rootfs/prog.bin
 
-initramfs.cpio: rootfs/hello.txt rootfs/prog.bin
+rootfs/osctest.bin: osctest.bin
+	mkdir -p rootfs
+	cp osctest.bin rootfs/osctest.bin
+
+initramfs.cpio: rootfs/hello.txt rootfs/prog.bin rootfs/osctest.bin
 	cd rootfs && find . | cpio -o -H newc > ../initramfs.cpio
 
 

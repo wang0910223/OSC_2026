@@ -19,6 +19,10 @@ static int current_priority = -1;
 
 void add_task(task_callback_t callback, void *arg, int priority)
 {
+    if(callback == NULL || arg == NULL){
+        uart_puts("add_task: callback or arg is NULL\n");
+        return;
+    }
     struct task *new_task = (struct task *)kmalloc(sizeof(struct task));
     if (!new_task) {
         uart_puts("add_task: kmalloc failed\n");

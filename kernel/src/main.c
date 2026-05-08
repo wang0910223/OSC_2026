@@ -8,6 +8,8 @@
 #include "timer.h"
 #include "plic.h"
 #include "riscv.h"
+#include "thread.h"
+#include "video.h"
 
 int boot_hart_id;
 
@@ -38,7 +40,8 @@ void main(int hart_id, void *dtb_ptr)
     uart_hex((unsigned long)cpio_addr);
 #endif
 
-    uart_puts("\nKernel Starting...\n\n");
+    /* Step 3.5: Initialize Video (reserve FB memory if needed) */
+    video_init();
 
     /* Step 4: Initialize the buddy page-frame allocator. */
     buddy_init();
@@ -64,8 +67,16 @@ void main(int hart_id, void *dtb_ptr)
     asm volatile("csrs sie, %0" :: "r"(SIE_SEIE));   //  enable external, 9th bit
     asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));   // enable global interrupt
     uart_puts("[PLIC] UART0 interrupt routing enabled.\n");
+    
+    // Bootstrap: create idle task for current context (main), set tp
+    struct task_struct *idle_thread = thread_create(idle);
+    asm volatile("mv tp, %0" : : "r"(idle_thread));
 
-    shell();
+    // Create shell as a separate thread
+    thread_create(shell);
+
+    // main becomes the idle loop
+    idle();
 
     return;
 }
