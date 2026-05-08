@@ -67,6 +67,7 @@ struct task_struct* get_current() {
 }
 
 void schedule() {
+    // critical section for traversing list and switch_to() which contains register load store operation 
     unsigned long saved_sstatus;
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
 
@@ -74,7 +75,7 @@ void schedule() {
     struct task_struct* next = prev->next;
 
     while (next->state != THREAD_RUNNING && next != prev) {
-        next = next->next;
+        next = next->next;   
     }
 
     if (prev != next) {
@@ -111,12 +112,16 @@ void kill_zombies() {
     if (!run_queue) return;
     struct task_struct* zombie_to_free = NULL; 
     
+    // enter critical section, since we need to traverse the run_queue and modify it
     unsigned long saved_sstatus;
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
     
     struct task_struct* curr = run_queue;
+    // each time only kill one thread, for shortening interrupt disable time
     do {
         struct task_struct* next = curr->next;
+
+        // only kill orphan (zombie) threads
         if (next->state == THREAD_ZOMBIE && next->ppid == 0) {
             
             dequeue(&run_queue, next);
@@ -131,10 +136,10 @@ void kill_zombies() {
 
     if (zombie_to_free) {
         if (zombie_to_free->user_space_base) {
-            kfree((void*)zombie_to_free->user_space_base);
+            kfree((void*)zombie_to_free->user_space_base);   // user space
         }
-        kfree((void*)zombie_to_free->stack);
-        kfree(zombie_to_free);
+        kfree((void*)zombie_to_free->stack);   // kernel stack
+        kfree(zombie_to_free);   // task_struct
     }
 }
 void idle() {
@@ -145,16 +150,18 @@ void idle() {
 }
 
 struct task_struct* thread_create(void (*threadfn)()) {
+    // allocate memory for task_struct
     struct task_struct* task = kmalloc(sizeof(struct task_struct));
+
+    // init task_struct
     task->user_space_base = 0;
     task->user_space_size = 0;
     task->tf = 0;
-
     task->pid = nr_threads++;
     task->ppid = 0;
     task->state = THREAD_RUNNING;
     task->stack = (unsigned long)kmalloc(STACK_SIZE);  // kernel stack
-    task->thread.ra = (unsigned long)threadfn;
+    task->thread.ra = (unsigned long)threadfn;   // the entry point to the user process, for here, it will be user_program_start()
     task->thread.sp = task->stack + STACK_SIZE;   // kernel sp
 
     // Initialize signal fields
@@ -169,7 +176,7 @@ struct task_struct* thread_create(void (*threadfn)()) {
 }
 
 void foo() {
-    asm volatile("csrs sstatus, 2");
+    asm volatile("csrs sstatus, 2");  // enable interrupt to timely output
     for (int i = 0; i < 5; i++) {
         uart_puts("Thread id: ");
         uart_dec(get_current()->pid);
@@ -234,8 +241,8 @@ int do_exec(const char *path) {
     uintptr_t user_sp = ((uintptr_t)buf + total) & ~0xfUL;
     
     // Update trap frame
-    curr->tf->sepc = entry;
-    curr->tf->sp = user_sp;
+    curr->tf->sepc = entry; // after handling the syscall, `sret` in bottom half of trap_entry will move PC to the sepc
+    curr->tf->sp = user_sp; // update the `sp` in trap frame, so that the bottom half of trap_entry can correctly restore it
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 
     return 0;
@@ -290,9 +297,9 @@ long do_fork(struct trap_frame *tf) {
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
 
     struct task_struct *parent = get_current();
-    struct task_struct *child = thread_create(0); // 0 because we will overwrite context
+    struct task_struct *child = thread_create(0); // 0 because we will overwrite context (already in user mode)
     
-    // Copy user stack
+    // allocate and copy user space (including stack)
     if (parent->user_space_base) {
         child->user_space_base = (unsigned long)kmalloc(parent->user_space_size);
         child->user_space_size = parent->user_space_size;
@@ -322,14 +329,16 @@ long do_fork(struct trap_frame *tf) {
         unsigned long offset = child->user_space_base - parent->user_space_base;
         child_tf->sp += offset;
         child_tf->sepc += offset;
-        child_tf->s0 += offset;  
-        child_tf->gp += offset;  
+        child_tf->s0 += offset;  // frame pointer
+        child_tf->gp += offset;  // `gp` points to the middle of the global data section, make sure it points to the child's region
         child_tf->ra += offset;
-    }
+    } 
     
     // Set child's kernel thread context:
     // When scheduler picks the child, switch_to returns into _ret_from_fork,
     // which restores the trap frame and srets back to U-mode.
+    // _ret_from_fork 是負責把 trap_frame 中的 register 值還原回 CPU 的一段 code
+    // 新的 thread 並不會向其他一般 thread 一樣從 schedule() 繼續跑，所以需要自己復原這些暫存器
     extern void _ret_from_fork();
     child->thread.ra = (unsigned long)_ret_from_fork;
     child->thread.sp = (unsigned long)child_tf;
@@ -400,6 +409,7 @@ int do_stop(long pid) {
 
             asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2)); 
             
+            // if kill itself, need to immediately giveup CPU
             if (curr == get_current()) {
                 schedule(); 
             }
@@ -513,7 +523,7 @@ void signal_check(struct trap_frame *tf) {
 
     struct task_struct *curr = get_current();
     if (!curr->pending_signals) return;
-    if (curr->is_handling_signal) return;
+    if (curr->is_handling_signal) return; // no nested
 
     // Find the lowest-numbered pending signal
     int sig = -1;

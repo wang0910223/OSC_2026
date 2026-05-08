@@ -10,20 +10,8 @@
 #include "riscv.h"
 #include "thread.h"
 #include "video.h"
-#include "bird.h"
 
 int boot_hart_id;
-
-void video_animation_thread() {
-    while (1) {
-        for (int i = 0; i < FRAME_COUNT; i++) {
-            video_bmp_display(&FRAME_PIXEL(i, 0, 0), FRAME_WIDTH, FRAME_HEIGHT);
-            for (int j = 0; j < 500000; j++) asm volatile("nop");
-            schedule();
-            // do_usleep(50000);
-        }
-    }
-}
 
 void main(int hart_id, void *dtb_ptr)
 {
@@ -80,17 +68,12 @@ void main(int hart_id, void *dtb_ptr)
     asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));   // enable global interrupt
     uart_puts("[PLIC] UART0 interrupt routing enabled.\n");
     
-    // shell();
-
     // Bootstrap: create idle task for current context (main), set tp
     struct task_struct *idle_thread = thread_create(idle);
     asm volatile("mv tp, %0" : : "r"(idle_thread));
 
     // Create shell as a separate thread
     thread_create(shell);
-
-    // Create video animation thread
-    // thread_create(video_animation_thread);
 
     // main becomes the idle loop
     idle();

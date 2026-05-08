@@ -18,6 +18,8 @@ void syscall_handler(struct trap_frame *tf) {
             long bytes_read = 0;
             
             unsigned long saved_sstatus;
+
+            // enable interrupt
             asm volatile("csrr %0, sstatus" : "=r"(saved_sstatus));
             asm volatile("csrs sstatus, 2");
             for (long i = 0; i < count; i++) {

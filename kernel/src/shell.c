@@ -217,6 +217,7 @@ static void command_test(void) {
 
 
 
+
 /** ----------------------------------------------------------------------
  * @brief run_user_program() – Load a file from initrd and drop into U-mode.
  *
@@ -224,7 +225,7 @@ static void command_test(void) {
  * region sized for both the code and a 16 KiB user stack, then calls
  * enter_user_mode() which does not return. The shell regains control only
  * through a trap (printed by trap_handler) followed by sret back to the
- * program.
+ * program. 
  * @param name Filename inside the initial ramdisk (e.g. "prog.bin").
  * -------------------------------------------------------------------- */
 static void run_user_program(const char *name) {
@@ -328,39 +329,6 @@ void command_testTask(void) {
   run_tasks();
 }
 
-static void high_prio_task_cb(void *arg) {
-    uart_puts("\n[10] start\n");
-}
-
-static void timer_trigger_cb(void *arg) {
-    uart_puts("\n--- [10] insert  ---\n");
-    add_task(high_prio_task_cb, NULL, 10);
-}
-static void delay_sec(int sec) {
-    unsigned long target = get_cycles() + sec * get_timer_freq();
-    while (get_cycles() < target) {
-    }
-}
-static void low_prio_task_cb(void *arg) {
-    uart_puts("\n[low] start\n");
-    
-    add_timer(timer_trigger_cb, NULL, 2);
-
-    delay_sec(4);
-
-    uart_puts("\n[low] end\n");
-}
-void command_testNest(void) {
-	uart_puts("=== Nested interrupt test start ===\n");
-
-	// 先把低優先權任務丟進去
-	add_task(low_prio_task_cb, NULL, 1);
-
-	// 開始執行 Bottom Half
-	run_tasks();
-
-	uart_puts("\n=== Nested interrupt test end ===\n");
-}
 
 void cmp_command() {
   if (!strcmp(buffer, "help"))
@@ -388,8 +356,6 @@ void cmp_command() {
     command_setTimeout();
   else if (!strcmp(buffer, "testTask"))
     command_testTask();
-  else if (!strcmp(buffer, "testNest"))
-    command_testNest();
   else if (!strcmp(buffer, "testThread"))
     test_threads();
   else
