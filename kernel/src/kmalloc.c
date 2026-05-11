@@ -107,8 +107,14 @@ void kmalloc_init(void)
 
 void *kmalloc(unsigned long size)
 {
-    if (size == 0)
-        return NULL;
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+
+    void *ret = NULL;
+    if (size == 0) {
+        ret = NULL;
+        goto out;
+    }
 
     /* ---- Large allocation: delegate to buddy ---- */
     int pidx = find_pool(size);
@@ -123,7 +129,8 @@ void *kmalloc(unsigned long size)
             for (unsigned long i = 0; i < pages; i++)
                 page_pool_idx[base + i] = -1;
         }
-        return ptr; /* buddy_alloc already logs */
+        ret = ptr; /* buddy_alloc already logs */
+        goto out;
     }
 
     /* ---- Small allocation: use chunk pool ---- */
@@ -133,8 +140,10 @@ void *kmalloc(unsigned long size)
     if (pool->free_list == NULL)
     {
         void *page = buddy_alloc(PAGE_SIZE);
-        if (!page)
-            return NULL;
+        if (!page) {
+            ret = NULL;
+            goto out;
+        }
 
         unsigned long pg_idx = addr_to_page_idx((uintptr_t)page);
         page_pool_idx[pg_idx] = (signed char)pidx;
@@ -157,13 +166,20 @@ void *kmalloc(unsigned long size)
 #ifdef DEBUG
     log_chunk_alloc((uintptr_t)chunk, pool->chunk_size);
 #endif
-    return (void *)chunk;
+    ret = (void *)chunk;
+
+out:
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
+    return ret;
 }
 
 void kfree(void *ptr)
 {
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+
     if (!ptr)
-        return;
+        goto out;
 
     uintptr_t addr = (uintptr_t)ptr;
 
@@ -177,7 +193,7 @@ void kfree(void *ptr)
     {
         /* Large allocation — delegate to buddy. */
         buddy_free(ptr); /* buddy_free already logs */
-        return;
+        goto out;
     }
 
     /* Small allocation — return chunk to its pool's free list. */
@@ -188,4 +204,7 @@ void kfree(void *ptr)
 #ifdef DEBUG
     log_chunk_free(addr, pool->chunk_size);
 #endif
+
+out:
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 }

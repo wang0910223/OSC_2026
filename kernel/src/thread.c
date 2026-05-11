@@ -6,6 +6,9 @@
 #include "cpio.h"
 #include "dtb.h"
 #include "trap.h"
+#include "vm.h"
+
+#define USER_SIGNAL_STACK 0x3fffffa000UL
 
 extern void switch_to(struct task_struct* prev, struct task_struct* next);
 
@@ -79,6 +82,10 @@ void schedule() {
     }
 
     if (prev != next) {
+        if (next->pgd) {
+            unsigned long satp = SATP_MODE_SV39 | (__pa(next->pgd) >> 12);
+            asm volatile("csrw satp, %0\n sfence.vma zero, zero\n" : : "r"(satp) : "memory");
+        }
         switch_to(prev, next);
     }
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
@@ -135,8 +142,9 @@ void kill_zombies() {
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 
     if (zombie_to_free) {
-        if (zombie_to_free->user_space_base) {
-            kfree((void*)zombie_to_free->user_space_base);   // user space
+        if (zombie_to_free->pgd) {
+            free_user_space(zombie_to_free->pgd);
+            zombie_to_free->pgd = 0;
         }
         kfree((void*)zombie_to_free->stack);   // kernel stack
         kfree(zombie_to_free);   // task_struct
@@ -154,8 +162,10 @@ struct task_struct* thread_create(void (*threadfn)()) {
     struct task_struct* task = kmalloc(sizeof(struct task_struct));
 
     // init task_struct
-    task->user_space_base = 0;
-    task->user_space_size = 0;
+    task->pgd = (unsigned long *)alloc_page();
+    for (int i = 256; i < 512; i++) {
+        task->pgd[i] = pg_dir[i];
+    }
     task->tf = 0;
     task->pid = nr_threads++;
     task->ppid = 0;
@@ -183,8 +193,8 @@ void foo() {
         uart_puts(" ");
         uart_dec(i);
         uart_puts("\n");
-        for (int j = 0; j < 10000000; j++);
-        schedule();
+        for (int j = 0; j < 10000; j++);
+        // schedule();
     }
     thread_exit();
 }
@@ -222,23 +232,39 @@ int do_exec(const char *path) {
     unsigned long src_size = 0;
     if (cpio_find(initrd, path, &src, &src_size) != 0) return -1;
     
-    // Allocate new user space (no MMU, just kmalloc)
-    unsigned long total = src_size + 16 * 1024; // 16 KiB user stack
-    void *buf = kmalloc(total);
-    if (!buf) return -1;
-    
-    byte_copy(buf, src, src_size);
-    
-    // Free old user space if it exists
-    if (curr->user_space_base) {
-        kfree((void *)curr->user_space_base);
+    // Clear old user space if exists
+    if (curr->pgd) {
+        unsigned long *old_pgd = curr->pgd;
+        curr->pgd = (unsigned long *)alloc_page();
+        for (int i = 256; i < 512; i++) {
+            curr->pgd[i] = pg_dir[i];
+        }
+        unsigned long satp = SATP_MODE_SV39 | (__pa(curr->pgd) >> 12);
+        asm volatile("csrw satp, %0\n sfence.vma zero, zero\n" : : "r"(satp) : "memory");
+        free_user_space(old_pgd);
     }
     
-    curr->user_space_base = (unsigned long)buf;
-    curr->user_space_size = total;
+    // Allocate new user space
+    unsigned long code_pages = (src_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    const unsigned char *src_ptr = (const unsigned char *)src;
+    for (unsigned long i = 0; i < code_pages; i++) {
+        void *page = alloc_page();
+        unsigned long chunk_size = (src_size > PAGE_SIZE) ? PAGE_SIZE : src_size;
+        byte_copy(page, src_ptr, chunk_size);
+        map_pages(curr->pgd, i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RX);
+        src_ptr += chunk_size;
+        src_size -= chunk_size;
+    }
     
-    uintptr_t entry = (uintptr_t)buf;
-    uintptr_t user_sp = ((uintptr_t)buf + total) & ~0xfUL;
+    unsigned long stack_pages = 4; // 16 KiB
+    for (unsigned long i = 0; i < stack_pages; i++) {
+        void *page = alloc_page();
+        // 0x4000000000 - 16KiB = 0x3fffffc000
+        map_pages(curr->pgd, 0x3fffffc000 + i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RW);
+    }
+    
+    uintptr_t entry = 0x0;
+    uintptr_t user_sp = 0x4000000000UL;
     
     // Update trap frame
     curr->tf->sepc = entry; // after handling the syscall, `sret` in bottom half of trap_entry will move PC to the sepc
@@ -250,9 +276,8 @@ int do_exec(const char *path) {
 
 
 static void user_program_start() {
-    struct task_struct *curr = get_current();
-    uintptr_t entry   = curr->user_space_base;
-    uintptr_t user_sp = (curr->user_space_base + curr->user_space_size) & ~0xfUL;
+    uintptr_t entry   = 0x0;
+    uintptr_t user_sp = 0x4000000000UL;
     
     enter_user_mode(entry, user_sp); // Does not return; executes sret into U-mode
 }
@@ -273,22 +298,35 @@ int user_program_execute(const char *path) {
         return -1;
     }
     
-    unsigned long total = src_size + 16 * 1024; // 16 KiB user stack
-    void *buf = kmalloc(total);
-    if (!buf) {
-        uart_puts("user_program_execute: out of memory\n");
-        return -1;
-    }
-    byte_copy(buf, src, src_size);
+    unsigned long code_pages = (src_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    const unsigned char *src_ptr = (const unsigned char *)src;
     
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+
     // thread_create sets ra = user_program_start, so when the scheduler
     // first picks this task, it calls user_program_start() which drops
     // into U-mode via enter_user_mode().
     struct task_struct *task = thread_create(user_program_start);
     task->ppid = get_current()->pid; // Set parent PID so do_waitpid can reap it
-    task->user_space_base = (unsigned long)buf;
-    task->user_space_size = total;
     
+    for (unsigned long i = 0; i < code_pages; i++) {
+        void *page = alloc_page();
+        unsigned long chunk_size = (src_size > PAGE_SIZE) ? PAGE_SIZE : src_size;
+        byte_copy(page, src_ptr, chunk_size);
+        map_pages(task->pgd, i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RX);
+        src_ptr += chunk_size;
+        src_size -= chunk_size;
+    }
+    
+    unsigned long stack_pages = 4;
+    for (unsigned long i = 0; i < stack_pages; i++) {
+        void *page = alloc_page();
+        map_pages(task->pgd, 0x3fffffc000 + i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RW);
+    }
+    
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
+
     return task->pid;
 }
 
@@ -300,10 +338,29 @@ long do_fork(struct trap_frame *tf) {
     struct task_struct *child = thread_create(0); // 0 because we will overwrite context (already in user mode)
     
     // allocate and copy user space (including stack)
-    if (parent->user_space_base) {
-        child->user_space_base = (unsigned long)kmalloc(parent->user_space_size);
-        child->user_space_size = parent->user_space_size;
-        byte_copy((void *)child->user_space_base, (void *)parent->user_space_base, parent->user_space_size);
+    for (int vpn2 = 0; vpn2 < 256; vpn2++) { // User space is bottom half (0 ~ 255)
+        if (parent->pgd[vpn2] & PAGE_PRESENT) {
+            unsigned long *pmd = (unsigned long *)__va((parent->pgd[vpn2] >> 10) << 12);
+            for (int vpn1 = 0; vpn1 < 512; vpn1++) {
+                if (pmd[vpn1] & PAGE_PRESENT) {
+                    unsigned long *pte = (unsigned long *)__va((pmd[vpn1] >> 10) << 12);
+                    for (int vpn0 = 0; vpn0 < 512; vpn0++) {
+                        if (pte[vpn0] & PAGE_PRESENT) {
+                            if (pte[vpn0] & PAGE_USER) {
+                                unsigned long ppn = pte[vpn0] >> 10;
+                                unsigned long parent_va = (unsigned long)__va(ppn << 12);
+                                unsigned long child_va = (unsigned long)alloc_page();
+                                byte_copy((void *)child_va, (void *)parent_va, PAGE_SIZE);
+                                
+                                unsigned long prot = pte[vpn0] & 0x3FF; // Keep all protection bits
+                                unsigned long vaddr = ((unsigned long)vpn2 << 30) | ((unsigned long)vpn1 << 21) | ((unsigned long)vpn0 << 12);
+                                map_pages(child->pgd, vaddr, PAGE_SIZE, __pa(child_va), prot);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // record parent pid
@@ -319,20 +376,7 @@ long do_fork(struct trap_frame *tf) {
     
     child_tf->tp = (unsigned long)child;
 
-    // Adjust child's user stack pointer: same offset within child's allocation
-    if (parent->user_space_base) {
-        /* run on parent's memory */
-        // unsigned long sp_offset = child_tf->sp - parent->user_space_base;
-        // child_tf->sp = child->user_space_base + sp_offset;
-
-        /* run on child's memory */
-        unsigned long offset = child->user_space_base - parent->user_space_base;
-        child_tf->sp += offset;
-        child_tf->sepc += offset;
-        child_tf->s0 += offset;  // frame pointer
-        child_tf->gp += offset;  // `gp` points to the middle of the global data section, make sure it points to the child's region
-        child_tf->ra += offset;
-    } 
+ 
     
     // Set child's kernel thread context:
     // When scheduler picks the child, switch_to returns into _ret_from_fork,
@@ -371,8 +415,9 @@ long do_waitpid(long pid) {
                     if (curr->state == THREAD_ZOMBIE) {
 
                         dequeue(&run_queue, curr);
-                        if (curr->user_space_base) {
-                            kfree((void *)curr->user_space_base);
+                        if (curr->pgd) {
+                            free_user_space(curr->pgd);
+                            curr->pgd = 0;
                         }
                         kfree((void *)curr->stack);
                         kfree(curr);
@@ -498,6 +543,7 @@ void do_sigreturn(struct trap_frame *tf) {
 
     // Free the temporary signal stack
     if (curr->signal_stack) {
+        unmap_page(curr->pgd, USER_SIGNAL_STACK);
         kfree(curr->signal_stack);
         curr->signal_stack = 0;
     }
@@ -548,10 +594,13 @@ void signal_check(struct trap_frame *tf) {
     // Deep-copy the current trap frame so we can restore it in sigreturn
     byte_copy(&curr->signal_saved_tf, tf, sizeof(struct trap_frame));
 
-    // Allocate a stack for the signal handler
+    // Allocate a stack for the signal handler (Kernel space)
     curr->signal_stack = kmalloc(STACK_SIZE);
     curr->is_handling_signal = 1;
     curr->pending_signals &= ~(1u << sig);
+
+    // Map this kernel frame to the designated User Virtual Address so User can access it
+    map_pages(curr->pgd, USER_SIGNAL_STACK, STACK_SIZE, __pa(curr->signal_stack), PAGE_USER | PAGE_READ | PAGE_WRITE | PAGE_EXEC);
 
     /*
      * Inject the sigreturn trampoline at the bottom of the signal stack:
@@ -563,10 +612,15 @@ void signal_check(struct trap_frame *tf) {
     unsigned int *trampoline = (unsigned int *)curr->signal_stack;
     trampoline[0] = 0x00B00893u; /* li a7, 11  */
     trampoline[1] = 0x00000073u; /* ecall      */
-    unsigned long trampoline_addr = (unsigned long)trampoline;
 
-    // New user stack top: top of signal stack, 16-byte aligned
-    unsigned long new_sp = ((unsigned long)curr->signal_stack + STACK_SIZE) & ~0xfUL;
+    /* Ensure instructions are pushed to memory/L2 and sync I-cache */
+    asm volatile("fence.i" : : : "memory");
+    
+    // Point to user virtual address instead of kernel address
+    unsigned long trampoline_addr = USER_SIGNAL_STACK;
+
+    // New user stack top: top of designated user signal stack, 16-byte aligned
+    unsigned long new_sp = (USER_SIGNAL_STACK + STACK_SIZE) & ~0xfUL;
 
     // Redirect trap frame to the handler
     tf->sepc = (unsigned long)handler;

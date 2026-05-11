@@ -360,23 +360,33 @@ void buddy_init(void)
 
 void *buddy_alloc(unsigned long size)
 {
-    if (size == 0)
-        return NULL;
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus)); // Enter critical section
+
+    void *ret = NULL;
+    if (size == 0) {
+        ret = NULL;
+        goto out;
+    }
 
     /* Determine how many pages we need. */
     unsigned long pages_needed = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     int target_order = pages_to_order(pages_needed);
 
-    if (target_order > MAX_ORDER)
-        return NULL; /* too large */
+    if (target_order > MAX_ORDER) {
+        ret = NULL; /* too large */
+        goto out;
+    }
 
     /* Search upward for a free block. */
     int current_order = target_order;
     while (current_order <= MAX_ORDER && list_empty(&free_list[current_order]))
         current_order++;
 
-    if (current_order > MAX_ORDER)
-        return NULL; /* out of memory */
+    if (current_order > MAX_ORDER) {
+        ret = NULL; /* out of memory */
+        goto out;
+    }
 
     /* Take the first block from that list. */
     struct list_head *chosen = free_list[current_order].next;
@@ -399,7 +409,11 @@ void *buddy_alloc(unsigned long size)
     uintptr_t addr = idx_to_addr(idx);
     log_alloc(addr, target_order, idx);
 
-    return (void *)addr;
+    ret = (void *)addr;
+
+out:
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2)); // Leave critical section
+    return ret;
 }
 
 void buddy_free(void *ptr)
@@ -407,9 +421,12 @@ void buddy_free(void *ptr)
     if (!ptr)
         return;
 
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus)); // Enter critical section
+
     uintptr_t addr = (uintptr_t)ptr;
     if (addr < buddy_base_addr || addr >= buddy_end_addr)
-        return;
+        goto out;
 
     unsigned long idx = addr_to_idx(addr);
 
@@ -452,4 +469,7 @@ void buddy_free(void *ptr)
     block_push(cur_idx, cur_order);
 
     log_free(addr, cur_order, cur_idx);
+
+out:
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2)); // Leave critical section
 }

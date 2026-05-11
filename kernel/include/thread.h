@@ -29,8 +29,7 @@ struct task_struct {
     struct task_struct* next;
     
     // User process specific
-    unsigned long user_space_base;
-    unsigned long user_space_size;
+    unsigned long *pgd;
     struct trap_frame *tf;
 
     // POSIX Signal

@@ -20,6 +20,10 @@
     (PAGE_PRESENT | PAGE_READ | PAGE_WRITE | PAGE_EXEC | PAGE_GLOBAL | \
      PAGE_ACCESSED | PAGE_DIRTY)
 
+#define PAGE_BASE      (PAGE_DIRTY | PAGE_ACCESSED | PAGE_USER | PAGE_PRESENT)
+#define PAGE_RX        (PAGE_BASE | PAGE_READ | PAGE_EXEC)
+#define PAGE_RW        (PAGE_BASE | PAGE_READ | PAGE_WRITE)
+
 #define SATP_MODE_SV39 (8UL << 60)
 
 #define __va(pa) ((void *)((unsigned long)(pa) + PAGE_OFFSET))
@@ -31,5 +35,11 @@ void setup_vm(void);
 void drop_identity_map(void);
 void map_pages_4k(unsigned long *pgd, unsigned long va, unsigned long size, unsigned long pa, unsigned long prot);
 void map_pages_2m(unsigned long *pgd, unsigned long va, unsigned long size, unsigned long pa, unsigned long prot);
+
+void *alloc_page(void);
+void pagewalk(unsigned long *pgd, unsigned long va, unsigned long pa, unsigned long prot);
+void map_pages(unsigned long *pgd, unsigned long va, unsigned long size, unsigned long pa, unsigned long prot);
+void free_user_space(unsigned long *pgd);
+void unmap_page(unsigned long *pgd, unsigned long va);
 
 #endif

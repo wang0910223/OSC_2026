@@ -77,6 +77,8 @@ void main(int hart_id, void *dtb_ptr)
 
     /* Step 4: Initialize the buddy page-frame allocator. */
     buddy_init();
+    extern int buddy_is_ready;
+    buddy_is_ready = 1;
 
     /* Step 5: Initialize the dynamic memory allocator (chunk pools). */
     kmalloc_init();
@@ -97,7 +99,8 @@ void main(int hart_id, void *dtb_ptr)
 
     /* Step 9: Open global S-mode interrupts (timer + external). */
     asm volatile("csrs sie, %0" :: "r"(SIE_SEIE));   //  enable external, 9th bit
-    asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE));   // enable global interrupt
+    // enable global interrupt and permit S-mode access to user pages (SUM)
+    asm volatile("csrs sstatus, %0" :: "r"(SSTATUS_SIE | SSTATUS_SUM));
     uart_puts("[PLIC] UART0 interrupt routing enabled.\n");
     
     // Bootstrap: create idle task for current context (main), set tp

@@ -156,12 +156,20 @@ char uart_getc(void) {
  * Display a string
  */
 void uart_puts(char *s) {
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+    
     while (*s) {
         uart_putc((unsigned int)*s++);
     }
+    
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 }
 
 void uart_hex(unsigned long h) {
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+
     uart_puts("0x");
     unsigned long n;
     for (int c = 60; c >= 0; c -= 4) {
@@ -169,15 +177,20 @@ void uart_hex(unsigned long h) {
         n += n > 9 ? 0x57 : '0';
         uart_putc(n);
     }
+
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 }
 
 void uart_dec(unsigned long x) {
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+
     char buf[32];
     int i = 0;
 
     if (x == 0) {
         uart_putc('0');
-        return;
+        goto done;
     }
 
     while (x > 0 && i < (int)sizeof(buf)) {
@@ -188,4 +201,7 @@ void uart_dec(unsigned long x) {
     while (i > 0) {
         uart_putc((unsigned char)buf[--i]);
     }
+
+done:
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 }

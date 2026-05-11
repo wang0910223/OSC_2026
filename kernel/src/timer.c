@@ -16,6 +16,7 @@
 #define TIMER_INTERVAL (SYS_CLOCK_FREQ * 2)
 
 static unsigned long boot_seconds = 0;
+static int need_resched = 0;
 
 struct timer_event {
   unsigned long expire_cycles;
@@ -37,10 +38,13 @@ unsigned long get_cycles(void) {
 }
 
 void add_timer_ticks(timer_callback_t callback, void *arg, unsigned long ticks) {
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
+
     struct timer_event *new_event = (struct timer_event *)kmalloc(sizeof(struct timer_event));
 	if (!new_event) {
 		uart_puts("add_timer: kmalloc failed\n");
-		return;
+		goto out;
 	}
 
 	/* fill the info. to struct timer_event */
@@ -48,10 +52,6 @@ void add_timer_ticks(timer_callback_t callback, void *arg, unsigned long ticks) 
 	new_event->callback = callback;
 	new_event->arg = arg;
 	new_event->next = NULL;
-
-	/* Critical section start */
-	unsigned long saved_sstatus;
-	asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
 
 	if (!timer_head || new_event->expire_cycles < timer_head->expire_cycles) {
 		new_event->next = timer_head;
@@ -67,8 +67,8 @@ void add_timer_ticks(timer_callback_t callback, void *arg, unsigned long ticks) 
 		curr->next = new_event;
 	}
 
-	/* Critical section end */
-	asm volatile("csrs sstatus, %0" ::"r"(saved_sstatus & 2));
+out:
+	asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
 }
 
 void add_timer(timer_callback_t callback, void *arg, int sec) {
@@ -88,7 +88,8 @@ static void preempt_callback(void *arg) {
     // Re-register for the next 1/32 second
     add_timer_ticks(preempt_callback, NULL, SYS_CLOCK_FREQ / 32);
     // Give up CPU
-    schedule();
+    // schedule();
+    need_resched = 1;
 }
 
 void core_timer_enable(void) {
@@ -104,6 +105,8 @@ void core_timer_enable(void) {
 }
 
 void core_timer_handler(void) {
+  need_resched = 0;
+
   /* Process all expired timers */
   while (timer_head && timer_head->expire_cycles <= get_cycles()) {
     struct timer_event *event = timer_head;
@@ -124,5 +127,9 @@ void core_timer_handler(void) {
   } else {
     /* Set timer to very large value so it doesn't trigger immediately again */
     sbi_set_timer(0xFFFFFFFFFFFFFFFFUL);
+  }
+
+  if (need_resched) {
+    schedule();
   }
 }
