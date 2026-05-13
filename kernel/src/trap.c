@@ -60,6 +60,18 @@ void trap_handler(struct trap_frame *tf) {
 
   /* The first bit in scause means asynchronize interrupt (1) or synchronize exception (0) */
 
+    // 只在發生真正異常（非中斷且非系統呼叫）時才在最開頭進行輸出，以避免 Timer 中斷頻率過高導致 UART 印不完而當機
+    if (!(cause & SCAUSE_INTR_BIT) && cause != EXC_ECALL_U) {
+        // uart_disable_async();
+        uart_puts("=== S-Mode trap ===\n");
+        uart_puts("scause: ");
+        uart_hex(cause);
+        uart_puts("\n");
+        uart_puts("stval: ");
+        uart_hex(tf->stval);
+        uart_puts("\n");
+    }
+
     // Case: Asynchronous Interrupts  (first bit is 1)
     if (cause & SCAUSE_INTR_BIT) {
 
@@ -114,16 +126,29 @@ void trap_handler(struct trap_frame *tf) {
     */
     uintptr_t rel_sepc = tf->sepc - g_user_base;
 
-    uart_puts("=== S-Mode trap ===\n");
-    uart_puts("scause: ");
-    uart_dec(cause);
-    uart_puts("\n");
-    uart_puts("sepc: ");
-    uart_hex((unsigned long)rel_sepc);
-    uart_puts("\n");
-    uart_puts("stval: ");
-    uart_dec(tf->stval);
-    uart_puts("\n");
+    // uart_puts("=== S-Mode trap ===\n");
+    // uart_puts("scause: ");
+    // uart_hex(cause);
+    // uart_puts("\n");
+    // uart_puts("sepc: ");
+    // uart_hex(tf->sepc);
+    // uart_puts(" (relative: ");
+    // uart_hex((unsigned long)rel_sepc);
+    // uart_puts(")\n");
+    // uart_puts("stval: ");
+    // uart_hex(tf->stval);
+    // uart_puts("\n");
+
+    // 根據 Advanced Exercise 2 規格：當 User Mode 發生 Page Fault 時，將其視為 Segmentation Fault 並終止該 process。
+    if (cause == 12 || cause == 13 || cause == 15) {
+        // SPP bit (sstatus 位元 8) 為 0 代表來自 User Mode
+        int from_user = !(tf->sstatus & (1UL << 8));
+        if (from_user) {
+            // uart_disable_async();
+            uart_puts("[Segmentation fault]: Kill Process\n");
+            thread_exit(); // 釋放並終止目前執行緒，不會回傳
+        }
+    }
 
     uart_puts("[trap] unhandled exception, halting.\n");
     for (;;) {

@@ -14,6 +14,14 @@ enum thread_state {
     THREAD_SLEEPING,
 };
 
+struct vm_area_struct {
+    unsigned long vm_start;         // Start address of the mapped region
+    unsigned long vm_end;           // End address (vm_start + length)
+    int vm_prot;                    // Protection flags
+    int vm_flags;                   // Map flags
+    struct vm_area_struct *vm_next; // Pointer to the next VMA
+};
+
 struct task_struct {
     struct thread_struct {
         unsigned long ra;
@@ -31,6 +39,7 @@ struct task_struct {
     // User process specific
     unsigned long *pgd;
     struct trap_frame *tf;
+    struct vm_area_struct *vma_list;
 
     // POSIX Signal
     void (*signal_handlers[SIGNAL_MAX])();

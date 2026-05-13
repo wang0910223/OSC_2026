@@ -146,6 +146,15 @@ void kill_zombies() {
             free_user_space(zombie_to_free->pgd);
             zombie_to_free->pgd = 0;
         }
+
+        struct vm_area_struct *vma = zombie_to_free->vma_list;
+        while (vma) {
+            struct vm_area_struct *next = vma->vm_next;
+            kfree(vma);
+            vma = next;
+        }
+        zombie_to_free->vma_list = 0;
+
         kfree((void*)zombie_to_free->stack);   // kernel stack
         kfree(zombie_to_free);   // task_struct
     }
@@ -170,6 +179,8 @@ struct task_struct* thread_create(void (*threadfn)()) {
     task->pid = nr_threads++;
     task->ppid = 0;
     task->state = THREAD_RUNNING;
+    // directly use kmalloc for kernel stack, it will return high half address 
+    // and the mapping already be done at setup_vm(), the high half mapping
     task->stack = (unsigned long)kmalloc(STACK_SIZE);  // kernel stack
     task->thread.ra = (unsigned long)threadfn;   // the entry point to the user process, for here, it will be user_program_start()
     task->thread.sp = task->stack + STACK_SIZE;   // kernel sp
@@ -180,6 +191,8 @@ struct task_struct* thread_create(void (*threadfn)()) {
     task->pending_signals = 0;
     task->is_handling_signal = 0;
     task->signal_stack = 0;
+
+    task->vma_list = 0;
 
     enqueue(&run_queue, task);
     return task;
@@ -251,7 +264,7 @@ int do_exec(const char *path) {
         void *page = alloc_page();
         unsigned long chunk_size = (src_size > PAGE_SIZE) ? PAGE_SIZE : src_size;
         byte_copy(page, src_ptr, chunk_size);
-        map_pages(curr->pgd, i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RX);
+        map_pages(curr->pgd, i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RX);  // source file with RX permission
         src_ptr += chunk_size;
         src_size -= chunk_size;
     }
@@ -260,7 +273,7 @@ int do_exec(const char *path) {
     for (unsigned long i = 0; i < stack_pages; i++) {
         void *page = alloc_page();
         // 0x4000000000 - 16KiB = 0x3fffffc000
-        map_pages(curr->pgd, 0x3fffffc000 + i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RW);
+        map_pages(curr->pgd, 0x3fffffc000 + i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RW);  // user stack with RW permission
     }
     
     uintptr_t entry = 0x0;
@@ -301,6 +314,9 @@ int user_program_execute(const char *path) {
     unsigned long code_pages = (src_size + PAGE_SIZE - 1) / PAGE_SIZE;
     const unsigned char *src_ptr = (const unsigned char *)src;
     
+    // this critical section is to make sure that we don't switch to another task
+    // before we finish setting up the new task's memory and trap frame
+    // since after thread_create(), this is a runnable thread and can be scheduled
     unsigned long saved_sstatus;
     asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus));
 
@@ -344,13 +360,14 @@ long do_fork(struct trap_frame *tf) {
             for (int vpn1 = 0; vpn1 < 512; vpn1++) {
                 if (pmd[vpn1] & PAGE_PRESENT) {
                     unsigned long *pte = (unsigned long *)__va((pmd[vpn1] >> 10) << 12);
+
                     for (int vpn0 = 0; vpn0 < 512; vpn0++) {
                         if (pte[vpn0] & PAGE_PRESENT) {
                             if (pte[vpn0] & PAGE_USER) {
                                 unsigned long ppn = pte[vpn0] >> 10;
                                 unsigned long parent_va = (unsigned long)__va(ppn << 12);
                                 unsigned long child_va = (unsigned long)alloc_page();
-                                byte_copy((void *)child_va, (void *)parent_va, PAGE_SIZE);
+                                byte_copy((void *)child_va, (void *)parent_va, PAGE_SIZE); // copy src and stack content
                                 
                                 unsigned long prot = pte[vpn0] & 0x3FF; // Keep all protection bits
                                 unsigned long vaddr = ((unsigned long)vpn2 << 30) | ((unsigned long)vpn1 << 21) | ((unsigned long)vpn0 << 12);
@@ -600,6 +617,10 @@ void signal_check(struct trap_frame *tf) {
     curr->pending_signals &= ~(1u << sig);
 
     // Map this kernel frame to the designated User Virtual Address so User can access it
+    // 雖然這個 mapping 已經存在 page table 上了，但 signal handler 要跑在 U-MODE
+    // 所以我們需要為這個 page 再加上一個 mapping (會變成一個 PA 在 page table 中對應到兩個 VA)
+    // 這邊固定 mapping 到 USER_SIGNAL_STACK 這個 VA 上
+    // 並且修改他的權限加上 user ，user 才能使用
     map_pages(curr->pgd, USER_SIGNAL_STACK, STACK_SIZE, __pa(curr->signal_stack), PAGE_USER | PAGE_READ | PAGE_WRITE | PAGE_EXEC);
 
     /*

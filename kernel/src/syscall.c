@@ -2,6 +2,77 @@
 #include "../include/uart.h"
 #include "../include/thread.h"
 #include "../include/video.h"
+#include "../include/vm.h"
+#include "../include/kmalloc.h"
+
+long do_mmap(void *addr, unsigned long length, int prot, int flags) {
+    if (length == 0) return -1;
+    length = (length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    struct task_struct *curr = get_current();
+    unsigned long vm_start = (unsigned long)addr;
+    
+    if (!vm_start || (vm_start & (PAGE_SIZE - 1)) || vm_start < 0x1000000000) {
+        vm_start = 0x1000000000;
+        struct vm_area_struct *vma = curr->vma_list;
+        while (vma) {
+            if (vm_start < vma->vm_end) {
+                vm_start = (vma->vm_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            }
+            vma = vma->vm_next;
+        }
+    } else {
+        struct vm_area_struct *vma = curr->vma_list;
+        while (vma) {
+            if ((vm_start >= vma->vm_start && vm_start < vma->vm_end) ||
+                (vm_start + length > vma->vm_start && vm_start + length <= vma->vm_end)) {
+                vm_start = 0x1000000000;
+                struct vm_area_struct *vma2 = curr->vma_list;
+                while (vma2) {
+                    if (vm_start < vma2->vm_end) {
+                        vm_start = (vma2->vm_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+                    }
+                    vma2 = vma2->vm_next;
+                }
+                break;
+            }
+            vma = vma->vm_next;
+        }
+    }
+
+    if (flags & MAP_ANONYMOUS) {
+        unsigned long page_prot = PAGE_USER;
+        if (prot & PROT_READ) page_prot |= PAGE_READ;
+        if (prot & PROT_WRITE) page_prot |= PAGE_WRITE;
+        if (prot & PROT_EXEC) page_prot |= PAGE_EXEC;
+
+        // RISC-V 不支援單獨寫入權限 (R=0, W=1 是保留組合會引發 Page Fault)。
+        // 為了與架構相容，有 Write 就必須強制開啟 Read 權限。
+        if (page_prot & PAGE_WRITE) {
+            page_prot |= PAGE_READ;
+        }
+
+        for (unsigned long i = 0; i < length; i += PAGE_SIZE) {
+            void *page = alloc_page();
+            if (!page) return -1;
+            map_pages(curr->pgd, vm_start + i, PAGE_SIZE, __pa(page), page_prot);
+        }
+    }
+
+    struct vm_area_struct *new_vma = kmalloc(sizeof(struct vm_area_struct));
+    if (!new_vma) return -1;
+    new_vma->vm_start = vm_start;
+    new_vma->vm_end = vm_start + length;
+    new_vma->vm_prot = prot;
+    new_vma->vm_flags = flags;
+    new_vma->vm_next = curr->vma_list;
+    curr->vma_list = new_vma;
+
+    // 修改分頁表後必須執行 sfence.vma 以清空舊的 TLB Cache，確保硬體立刻認得新對應的實體空間
+    asm volatile("sfence.vma zero, zero" : : : "memory");
+
+    return vm_start;
+}
 
 void syscall_handler(struct trap_frame *tf) {
     // asm volatile("csrs sstatus, 2");
@@ -101,6 +172,14 @@ void syscall_handler(struct trap_frame *tf) {
             int pid = (int)tf->a0;
             int sig = (int)tf->a1;
             ret = do_kill(pid, sig);
+            break;
+        }
+        case SYS_mmap: {
+            void *addr = (void *)tf->a0;
+            unsigned long length = tf->a1;
+            int prot = (int)tf->a2;
+            int flags = (int)tf->a3;
+            ret = do_mmap(addr, length, prot, flags);
             break;
         }
         default:

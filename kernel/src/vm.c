@@ -6,6 +6,7 @@ unsigned long __attribute__((section(".bss"), aligned(PAGE_SIZE))) pg_dir[512];
 
 int buddy_is_ready = 0;
 
+/******************* for start up use only ********************/
 static unsigned long early_alloc_page(void) {
     static unsigned long __attribute__((section(".bss"), aligned(PAGE_SIZE))) early_pages[64][512];
     static int idx = 0;
@@ -122,9 +123,7 @@ void setup_vm(void) {
     
     
     unsigned long mmio_prot = PAGE_READ | PAGE_WRITE | PAGE_GLOBAL;
-    // Board UART (0x09000000)
-    // map_pages_4k(pg_dir, 0x09000000, 0x1000, 0x09000000, mmio_prot);
-    // map_pages_4k(pg_dir, PAGE_OFFSET + 0x09000000, 0x1000, 0x09000000, mmio_prot);
+    // Board UART 
     map_pages_4k(pg_dir, 0xD4017000, 0x1000, 0xD4017000, mmio_prot);
     map_pages_4k(pg_dir, PAGE_OFFSET + 0xD4017000, 0x1000, 0xD4017000, mmio_prot);
 
@@ -141,7 +140,6 @@ void setup_vm(void) {
         : : "r"(satp) : "memory"
     );
 }
-
 void drop_identity_map(void) {
     pg_dir[0] = 0; // Covers 0x0 ~ 0x3FFFFFFF (Board RAM, UART, PLIC, CLINT)
     pg_dir[1] = 0; // Covers 0x40000000 ~ 0x7FFFFFFF
@@ -159,6 +157,8 @@ void drop_identity_map(void) {
     // uart_puts("\n");
 }
 
+/******************* *************************************/
+
 #include "buddy.h"
 
 static void byte_memset(void *dst, int c, unsigned long n) {
@@ -168,11 +168,13 @@ static void byte_memset(void *dst, int c, unsigned long n) {
 
 void *alloc_page(void) {
     void *p = buddy_alloc(PAGE_SIZE);
-    if (p) byte_memset(p, 0, PAGE_SIZE);
+    // if (p) byte_memset(p, 0, PAGE_SIZE);
+    if (p) memset(p, 0, PAGE_SIZE);
     return p;
 }
 
 void pagewalk(unsigned long *pgd, unsigned long va, unsigned long pa, unsigned long prot) {
+    // `& 0x1ff` for getting the corresponding 9 bits 
     int vpn2 = (va >> 30) & 0x1ff;
     int vpn1 = (va >> 21) & 0x1ff;
     int vpn0 = (va >> 12) & 0x1ff;
@@ -194,6 +196,8 @@ void pagewalk(unsigned long *pgd, unsigned long va, unsigned long pa, unsigned l
         pte = (unsigned long *)new_page_va;
     }
 
+    // permission after `prot` just in case error 
+    // idealy, `prot` shouldn't contain those bits
     pte[vpn0] = ((pa >> 12) << 10) | prot | PAGE_PRESENT | PAGE_ACCESSED | PAGE_DIRTY;
 }
 
@@ -241,5 +245,7 @@ void unmap_page(unsigned long *pgd, unsigned long va) {
     unsigned long *pte = (unsigned long *)__va((pmd[vpn1] >> 10) << 12);
     
     pte[vpn0] = 0;
+    // first argument is virtual address
+    // it means only flush the TLB entry corresponding to the given virtual address
     asm volatile("sfence.vma %0, zero" : : "r"(va) : "memory");
 }
