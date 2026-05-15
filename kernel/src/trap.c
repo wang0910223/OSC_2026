@@ -9,6 +9,8 @@
 
 #include "plic.h"
 #include "thread.h"
+#include "vm.h"
+#include "buddy.h"
 
 _Static_assert(sizeof(struct trap_frame) == TF_SIZE,
                "struct trap_frame size must match TF_SIZE in trap.h");
@@ -139,15 +141,102 @@ void trap_handler(struct trap_frame *tf) {
     // uart_hex(tf->stval);
     // uart_puts("\n");
 
-    // 根據 Advanced Exercise 2 規格：當 User Mode 發生 Page Fault 時，將其視為 Segmentation Fault 並終止該 process。
+    // 根據 Advanced Exercise 2 規格：當 User Mode 發生 Page Fault 時，實作 Demand Paging
     if (cause == 12 || cause == 13 || cause == 15) {
-        // SPP bit (sstatus 位元 8) 為 0 代表來自 User Mode
+        struct task_struct *curr = get_current();
+        struct vm_area_struct *vma = curr->vma_list;
+        struct vm_area_struct *target_vma = 0;
+
+        // 1. Check if the faulting address belongs to any VMA (regardless of user/kernel mode)
+        while (vma) {
+            if (tf->stval >= vma->vm_start && tf->stval < vma->vm_end) {
+                target_vma = vma;
+                break;
+            }
+            vma = vma->vm_next;
+        }
+
+        // 2. If matched, dynamically allocate and map it
+        if (target_vma) {
+            unsigned long fault_page_va = tf->stval & ~(PAGE_SIZE - 1);
+            unsigned long *pte_ptr = walk_pte(curr->pgd, fault_page_va);
+
+            // A. Copy-On-Write Check
+            if (pte_ptr && (*pte_ptr & PAGE_PRESENT)) {
+                if (cause == 15 && (*pte_ptr & PAGE_USER) && !(*pte_ptr & PAGE_WRITE)) {
+                    if (target_vma->vm_prot & 2) { // PROT_WRITE allowed
+                        // Copy-On-Write event confirmed!
+                        uart_puts("[Permission fault]: ");
+                        uart_hex(tf->stval);
+                        uart_puts("\n");
+
+                        unsigned long old_pa = (*pte_ptr >> 10) << 12;
+                        void *old_page_va = (void *)__va(old_pa);
+
+                        if (get_page_ref_count(old_page_va) > 1) {
+                            // Shared frame, need reallocation & clone
+                            void *new_page = alloc_page();
+                            if (!new_page) {
+                                uart_puts("COW: Out of memory!\n");
+                                thread_exit();
+                            }
+                            memcpy(new_page, old_page_va, PAGE_SIZE);
+
+                            // Update PTE to point to new page with PAGE_WRITE
+                            unsigned long flags = (*pte_ptr & 0x3FF) | PAGE_WRITE;
+                            *pte_ptr = ((__pa(new_page) >> 12) << 10) | flags;
+
+                            // Decrement reference count on the original frame
+                            buddy_free(old_page_va);
+                        } else {
+                            // Exclusive owner, simply restore the write flag in-place
+                            *pte_ptr |= PAGE_WRITE;
+                        }
+
+                        // Invalidate the TLB for the modified address
+                        asm volatile("sfence.vma %0, zero" : : "r"(fault_page_va) : "memory");
+                        return; // Re-run instruction successfully
+                    }
+                }
+            }
+
+            // B. Standard Demand Paging Check
+            int perm_ok = 1;
+            if (cause == 15 && !(target_vma->vm_prot & 2)) perm_ok = 0; // PROT_WRITE
+            if (cause == 13 && !(target_vma->vm_prot & 1)) perm_ok = 0; // PROT_READ
+            if (cause == 12 && !(target_vma->vm_prot & 4)) perm_ok = 0; // PROT_EXEC
+
+            if (perm_ok) {
+                void *page = alloc_page();
+                if (page) {
+                    memset(page, 0, PAGE_SIZE);
+                    
+                    uart_puts("[Translation fault]: ");
+                    uart_hex(tf->stval);
+                    uart_puts("\n");
+
+                    unsigned long page_prot = PAGE_USER;
+                    if (target_vma->vm_prot & 1) page_prot |= PAGE_READ;
+                    if (target_vma->vm_prot & 2) page_prot |= PAGE_WRITE;
+                    if (target_vma->vm_prot & 4) page_prot |= PAGE_EXEC;
+                    if (page_prot & PAGE_WRITE) page_prot |= PAGE_READ;
+
+                    // 向下對齊頁面邊界
+                    unsigned long fault_page_va = tf->stval & ~(PAGE_SIZE - 1);
+                    map_pages(curr->pgd, fault_page_va, PAGE_SIZE, __pa(page), page_prot);
+                    asm volatile("sfence.vma zero, zero" : : : "memory");
+                    return; // 順利排除分頁錯誤，重試執行
+                }
+            }
+        }
+
+        // 3. If no VMA found OR permission check failed:
         int from_user = !(tf->sstatus & (1UL << 8));
         if (from_user) {
-            // uart_disable_async();
             uart_puts("[Segmentation fault]: Kill Process\n");
-            thread_exit(); // 釋放並終止目前執行緒，不會回傳
+            thread_exit(); 
         }
+        // 若來自核心態且查無 VMA，直接向下流到 Kernel Panic，確保安全
     }
 
     uart_puts("[trap] unhandled exception, halting.\n");

@@ -41,5 +41,6 @@ void pagewalk(unsigned long *pgd, unsigned long va, unsigned long pa, unsigned l
 void map_pages(unsigned long *pgd, unsigned long va, unsigned long size, unsigned long pa, unsigned long prot);
 void free_user_space(unsigned long *pgd);
 void unmap_page(unsigned long *pgd, unsigned long va);
+unsigned long *walk_pte(unsigned long *pgd, unsigned long va);
 
 #endif

@@ -53,6 +53,16 @@ void *buddy_alloc(unsigned long size);
 void buddy_free(void *ptr);
 
 /**
+ * Increments reference count of physical frame corresponding to ptr.
+ */
+void get_page_ref(void *ptr);
+
+/**
+ * Returns reference count of physical frame corresponding to ptr.
+ */
+int get_page_ref_count(void *ptr);
+
+/**
  * Reserve physical memory boundaries before buddy system brings up memory tracking.
  */
 void memory_reserve(uint64_t start, uint64_t size);

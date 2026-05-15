@@ -25,6 +25,7 @@ uintptr_t buddy_base_addr = 0;
 uintptr_t buddy_end_addr = 0;
 unsigned long buddy_total_pages = 0;
 int *frame_array = NULL;
+int *ref_count = NULL;
 
 extern char _start[];
 extern char _end[];
@@ -293,13 +294,22 @@ void buddy_init(void)
         return;
     }
 
+    /* Allocate ref_count array via bump pointer */
+    ref_count = (int *)startup_alloc(buddy_total_pages * sizeof(int));
+    if (!ref_count) {
+        uart_puts("Failed to allocate ref_count!\n");
+        return;
+    }
+
     /* Initialise all free list heads. */
     for (int i = 0; i <= MAX_ORDER; i++)
         INIT_LIST_HEAD(&free_list[i]);
 
-    /* All frames start as FRAME_FREE_PART */
-    for (unsigned long i = 0; i < buddy_total_pages; i++)
+    /* All frames start as FRAME_FREE_PART with 0 ref_count */
+    for (unsigned long i = 0; i < buddy_total_pages; i++) {
         frame_array[i] = FRAME_FREE_PART;
+        ref_count[i] = 0;
+    }
 
     /* Flag reserved regions in frame_array */
     for (int i = 0; i < num_reserved; i++) {
@@ -308,6 +318,7 @@ void buddy_init(void)
         if (start_idx < buddy_total_pages) {
             for (unsigned long j = start_idx; j < end_idx && j < buddy_total_pages; j++) {
                 frame_array[j] = ALLOC_TAG(j, 0); // Marking it as effectively allocated
+                ref_count[j] = 1;                 // Reserved regions are owned/pinned
             }
         }
     }
@@ -403,8 +414,10 @@ void *buddy_alloc(unsigned long size)
 
     /* Mark all pages of the allocated block. */
     unsigned long alloc_pages = 1UL << target_order;
-    for (unsigned long i = 0; i < alloc_pages; i++)
+    for (unsigned long i = 0; i < alloc_pages; i++) {
         frame_array[idx + i] = ALLOC_TAG(idx, target_order);
+        if (ref_count) ref_count[idx + i] = 1;
+    }
 
     uintptr_t addr = idx_to_addr(idx);
     log_alloc(addr, target_order, idx);
@@ -429,6 +442,14 @@ void buddy_free(void *ptr)
         goto out;
 
     unsigned long idx = addr_to_idx(addr);
+
+    // CoW Reference Counting Check
+    if (ref_count) {
+        ref_count[idx]--;
+        if (ref_count[idx] > 0) {
+            goto out; // Still referenced, do not free back to buddy free lists
+        }
+    }
 
     /* Extract the order of the originally allocated block from the tag */
     int order = GET_ALLOC_ORDER(frame_array[idx]);
@@ -472,4 +493,40 @@ void buddy_free(void *ptr)
 
 out:
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2)); // Leave critical section
+}
+
+void get_page_ref(void *ptr)
+{
+    if (!ptr)
+        return;
+
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus)); // Enter critical section
+
+    uintptr_t addr = (uintptr_t)ptr;
+    if (addr >= buddy_base_addr && addr < buddy_end_addr && ref_count) {
+        unsigned long idx = addr_to_idx(addr);
+        ref_count[idx]++;
+    }
+
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2)); // Leave critical section
+}
+
+int get_page_ref_count(void *ptr)
+{
+    if (!ptr)
+        return 0;
+
+    unsigned long saved_sstatus;
+    asm volatile("csrrci %0, sstatus, 2" : "=r"(saved_sstatus)); // Enter critical section
+
+    int ret = 0;
+    uintptr_t addr = (uintptr_t)ptr;
+    if (addr >= buddy_base_addr && addr < buddy_end_addr && ref_count) {
+        unsigned long idx = addr_to_idx(addr);
+        ret = ref_count[idx];
+    }
+
+    asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2)); // Leave critical section
+    return ret;
 }

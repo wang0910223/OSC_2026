@@ -7,6 +7,7 @@
 #include "dtb.h"
 #include "trap.h"
 #include "vm.h"
+#include "utils.h"
 
 #define USER_SIGNAL_STACK 0x3fffffa000UL
 
@@ -269,11 +270,21 @@ int do_exec(const char *path) {
         src_size -= chunk_size;
     }
     
-    unsigned long stack_pages = 4; // 16 KiB
-    for (unsigned long i = 0; i < stack_pages; i++) {
-        void *page = alloc_page();
-        // 0x4000000000 - 16KiB = 0x3fffffc000
-        map_pages(curr->pgd, 0x3fffffc000 + i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RW);  // user stack with RW permission
+    // 1. Eagerly map the FIRST page (Top stack page)
+    void *top_page = alloc_page();
+    memset(top_page, 0, PAGE_SIZE);
+    map_pages(curr->pgd, 0x3ffffff000UL, PAGE_SIZE, __pa(top_page), PAGE_RW);
+
+    // 2. Register remaining 3 pages via VMA
+    struct vm_area_struct *stack_vma = kmalloc(sizeof(struct vm_area_struct));
+    if (stack_vma) {
+        stack_vma->vm_start = 0x3fffffc000UL;
+        stack_vma->vm_end = 0x4000000000UL; // Fully cover the 16KB stack range
+        stack_vma->vm_prot = 1 | 2; // PROT_READ | PROT_WRITE
+        stack_vma->vm_flags = 0x20; // MAP_ANONYMOUS
+        
+        stack_vma->vm_next = curr->vma_list;
+        curr->vma_list = stack_vma;
     }
     
     uintptr_t entry = 0x0;
@@ -335,10 +346,22 @@ int user_program_execute(const char *path) {
         src_size -= chunk_size;
     }
     
-    unsigned long stack_pages = 4;
-    for (unsigned long i = 0; i < stack_pages; i++) {
-        void *page = alloc_page();
-        map_pages(task->pgd, 0x3fffffc000 + i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RW);
+    // 1. Eagerly map the FIRST page (Top stack page)
+    void *top_page = alloc_page();
+    memset(top_page, 0, PAGE_SIZE);
+    // 位址: 0x3ffffff000 ~ 0x4000000000
+    map_pages(task->pgd, 0x3ffffff000UL, PAGE_SIZE, __pa(top_page), PAGE_RW);
+
+    // 2. Register the remaining 3 pages (12 KiB) via VMA
+    struct vm_area_struct *stack_vma = kmalloc(sizeof(struct vm_area_struct));
+    if (stack_vma) {
+        stack_vma->vm_start = 0x3fffffc000UL; // 陣列起點
+        stack_vma->vm_end = 0x4000000000UL;   // 涵蓋整個 16KB Stack 區域，包含 eager top page
+        stack_vma->vm_prot = 1 | 2; // PROT_READ | PROT_WRITE
+        stack_vma->vm_flags = 0x20; // MAP_ANONYMOUS
+        
+        stack_vma->vm_next = task->vma_list;
+        task->vma_list = stack_vma;
     }
     
     asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
@@ -353,25 +376,68 @@ long do_fork(struct trap_frame *tf) {
     struct task_struct *parent = get_current();
     struct task_struct *child = thread_create(0); // 0 because we will overwrite context (already in user mode)
     
-    // allocate and copy user space (including stack)
+    // --- Metadata Copy (Duplicate parent->vma_list to child) ---
+    struct vm_area_struct *parent_vma = parent->vma_list;
+    child->vma_list = NULL;
+    struct vm_area_struct *last_child_vma = NULL;
+
+    while (parent_vma) {
+        struct vm_area_struct *new_vma = kmalloc(sizeof(struct vm_area_struct));
+        if (new_vma) {
+            new_vma->vm_start = parent_vma->vm_start;
+            new_vma->vm_end = parent_vma->vm_end;
+            new_vma->vm_prot = parent_vma->vm_prot;
+            new_vma->vm_flags = parent_vma->vm_flags;
+            new_vma->vm_next = NULL;
+
+            if (!child->vma_list) {
+                child->vma_list = new_vma;
+            } else {
+                last_child_vma->vm_next = new_vma;
+            }
+            last_child_vma = new_vma;
+        }
+        parent_vma = parent_vma->vm_next;
+    }
+
+    // Duplicate page tables for CoW instead of eager page copying
     for (int vpn2 = 0; vpn2 < 256; vpn2++) { // User space is bottom half (0 ~ 255)
         if (parent->pgd[vpn2] & PAGE_PRESENT) {
-            unsigned long *pmd = (unsigned long *)__va((parent->pgd[vpn2] >> 10) << 12);
+            unsigned long *parent_pmd = (unsigned long *)__va((parent->pgd[vpn2] >> 10) << 12);
+            
+            // Allocate child PMD
+            unsigned long *child_pmd = (unsigned long *)alloc_page();
+            if (!child_pmd) {
+                asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
+                return -1;
+            }
+            child->pgd[vpn2] = ((__pa(child_pmd) >> 12) << 10) | PAGE_PRESENT;
+
             for (int vpn1 = 0; vpn1 < 512; vpn1++) {
-                if (pmd[vpn1] & PAGE_PRESENT) {
-                    unsigned long *pte = (unsigned long *)__va((pmd[vpn1] >> 10) << 12);
+                if (parent_pmd[vpn1] & PAGE_PRESENT) {
+                    unsigned long *parent_pte = (unsigned long *)__va((parent_pmd[vpn1] >> 10) << 12);
+                    
+                    // Allocate child PTE
+                    unsigned long *child_pte = (unsigned long *)alloc_page();
+                    if (!child_pte) {
+                        asm volatile("csrs sstatus, %0" :: "r"(saved_sstatus & 2));
+                        return -1;
+                    }
+                    child_pmd[vpn1] = ((__pa(child_pte) >> 12) << 10) | PAGE_PRESENT;
 
                     for (int vpn0 = 0; vpn0 < 512; vpn0++) {
-                        if (pte[vpn0] & PAGE_PRESENT) {
-                            if (pte[vpn0] & PAGE_USER) {
-                                unsigned long ppn = pte[vpn0] >> 10;
-                                unsigned long parent_va = (unsigned long)__va(ppn << 12);
-                                unsigned long child_va = (unsigned long)alloc_page();
-                                byte_copy((void *)child_va, (void *)parent_va, PAGE_SIZE); // copy src and stack content
-                                
-                                unsigned long prot = pte[vpn0] & 0x3FF; // Keep all protection bits
-                                unsigned long vaddr = ((unsigned long)vpn2 << 30) | ((unsigned long)vpn1 << 21) | ((unsigned long)vpn0 << 12);
-                                map_pages(child->pgd, vaddr, PAGE_SIZE, __pa(child_va), prot);
+                        if (parent_pte[vpn0] & PAGE_PRESENT) {
+                            if (parent_pte[vpn0] & PAGE_USER) {
+                                // Remove write access from parent (enforce CoW)
+                                parent_pte[vpn0] &= ~PAGE_WRITE;
+
+                                // Increment reference count of physical frame
+                                unsigned long ppn = parent_pte[vpn0] >> 10;
+                                void *page_va = (void *)__va(ppn << 12);
+                                get_page_ref(page_va);
+
+                                // Assign matching entry to child (guaranteed read-only)
+                                child_pte[vpn0] = parent_pte[vpn0];
                             }
                         }
                     }
@@ -379,6 +445,8 @@ long do_fork(struct trap_frame *tf) {
             }
         }
     }
+    // Aggregate TLB Flush
+    asm volatile("sfence.vma zero, zero" : : : "memory");
 
     // record parent pid
     child->ppid = parent->pid;

@@ -249,3 +249,18 @@ void unmap_page(unsigned long *pgd, unsigned long va) {
     // it means only flush the TLB entry corresponding to the given virtual address
     asm volatile("sfence.vma %0, zero" : : "r"(va) : "memory");
 }
+
+unsigned long *walk_pte(unsigned long *pgd, unsigned long va) {
+    if (!pgd) return 0;
+    int vpn2 = (va >> 30) & 0x1ff;
+    int vpn1 = (va >> 21) & 0x1ff;
+    int vpn0 = (va >> 12) & 0x1ff;
+
+    if (!(pgd[vpn2] & PAGE_PRESENT)) return 0;
+    unsigned long *pmd = (unsigned long *)__va((pgd[vpn2] >> 10) << 12);
+    
+    if (!(pmd[vpn1] & PAGE_PRESENT)) return 0;
+    unsigned long *pte = (unsigned long *)__va((pmd[vpn1] >> 10) << 12);
+    
+    return &pte[vpn0];
+}

@@ -12,33 +12,27 @@ long do_mmap(void *addr, unsigned long length, int prot, int flags) {
     struct task_struct *curr = get_current();
     unsigned long vm_start = (unsigned long)addr;
     
+    // case 1: User 沒給位址、位址沒對齊、或給的位址太低
+    // method: 從 0x1000000000 開始，不斷往上推到所有現有 VMA 的最高點。
     if (!vm_start || (vm_start & (PAGE_SIZE - 1)) || vm_start < 0x1000000000) {
         vm_start = 0x1000000000;
-        struct vm_area_struct *vma = curr->vma_list;
-        while (vma) {
-            if (vm_start < vma->vm_end) {
-                vm_start = (vma->vm_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-            }
-            vma = vma->vm_next;
-        }
-    } else {
-        struct vm_area_struct *vma = curr->vma_list;
-        while (vma) {
-            if ((vm_start >= vma->vm_start && vm_start < vma->vm_end) ||
-                (vm_start + length > vma->vm_start && vm_start + length <= vma->vm_end)) {
-                vm_start = 0x1000000000;
-                struct vm_area_struct *vma2 = curr->vma_list;
-                while (vma2) {
-                    if (vm_start < vma2->vm_end) {
-                        vm_start = (vma2->vm_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-                    }
-                    vma2 = vma2->vm_next;
-                }
-                break;
-            }
-            vma = vma->vm_next;
-        }
     }
+    
+    // Check if vm_start + length overlaps with any existing VMA
+    // If so, move vm_start past the overlapping VMA and check again
+    int overlap;
+    do {
+        overlap = 0;
+        struct vm_area_struct *vma = curr->vma_list;
+        while (vma) {
+            if (vm_start < vma->vm_end && (vm_start + length) > vma->vm_start) {
+                vm_start = (vma->vm_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+                overlap = 1;
+                break; // Restart check with new vm_start
+            }
+            vma = vma->vm_next;
+        }
+    } while (overlap);
 
     if (flags & MAP_ANONYMOUS) {
         unsigned long page_prot = PAGE_USER;
@@ -52,10 +46,12 @@ long do_mmap(void *addr, unsigned long length, int prot, int flags) {
             page_prot |= PAGE_READ;
         }
 
-        for (unsigned long i = 0; i < length; i += PAGE_SIZE) {
-            void *page = alloc_page();
-            if (!page) return -1;
-            map_pages(curr->pgd, vm_start + i, PAGE_SIZE, __pa(page), page_prot);
+        if (flags & MAP_POPULATE) {
+            for (unsigned long i = 0; i < length; i += PAGE_SIZE) {
+                void *page = alloc_page();
+                if (!page) return -1;
+                map_pages(curr->pgd, vm_start + i, PAGE_SIZE, __pa(page), page_prot);
+            }
         }
     }
 
@@ -68,6 +64,7 @@ long do_mmap(void *addr, unsigned long length, int prot, int flags) {
     new_vma->vm_next = curr->vma_list;
     curr->vma_list = new_vma;
 
+
     // 修改分頁表後必須執行 sfence.vma 以清空舊的 TLB Cache，確保硬體立刻認得新對應的實體空間
     asm volatile("sfence.vma zero, zero" : : : "memory");
 
@@ -78,6 +75,7 @@ void syscall_handler(struct trap_frame *tf) {
     // asm volatile("csrs sstatus, 2");
     long syscall_num = tf->a7;
     long ret = -1;
+
 
     switch (syscall_num) {
         case SYS_getpid:
