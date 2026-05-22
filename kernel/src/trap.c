@@ -62,7 +62,7 @@ void trap_handler(struct trap_frame *tf) {
 
   /* The first bit in scause means asynchronize interrupt (1) or synchronize exception (0) */
 
-    // 只在發生真正異常（非中斷且非系統呼叫）時才在最開頭進行輸出，以避免 Timer 中斷頻率過高導致 UART 印不完而當機
+    // DEBUG USE
     if (!(cause & SCAUSE_INTR_BIT) && cause != EXC_ECALL_U) {
         // uart_disable_async();
         uart_puts("=== S-Mode trap ===\n");
@@ -128,21 +128,9 @@ void trap_handler(struct trap_frame *tf) {
     */
     uintptr_t rel_sepc = tf->sepc - g_user_base;
 
-    // uart_puts("=== S-Mode trap ===\n");
-    // uart_puts("scause: ");
-    // uart_hex(cause);
-    // uart_puts("\n");
-    // uart_puts("sepc: ");
-    // uart_hex(tf->sepc);
-    // uart_puts(" (relative: ");
-    // uart_hex((unsigned long)rel_sepc);
-    // uart_puts(")\n");
-    // uart_puts("stval: ");
-    // uart_hex(tf->stval);
-    // uart_puts("\n");
 
-    // 根據 Advanced Exercise 2 規格：當 User Mode 發生 Page Fault 時，實作 Demand Paging
-    if (cause == 12 || cause == 13 || cause == 15) {
+    // Using demand paging to deal with page fault
+    if (cause == EXC_INST_PAGE_FAULT || cause == EXC_LOAD_PAGE_FAULT || cause == EXC_STORE_PAGE_FAULT) {
         struct task_struct *curr = get_current();
         struct vm_area_struct *vma = curr->vma_list;
         struct vm_area_struct *target_vma = 0;
@@ -159,11 +147,13 @@ void trap_handler(struct trap_frame *tf) {
         // 2. If matched, dynamically allocate and map it
         if (target_vma) {
             unsigned long fault_page_va = tf->stval & ~(PAGE_SIZE - 1);
+            
+            // walk_pte return the address of the PTE for further modification to the permission
             unsigned long *pte_ptr = walk_pte(curr->pgd, fault_page_va);
 
             // A. Copy-On-Write Check
             if (pte_ptr && (*pte_ptr & PAGE_PRESENT)) {
-                if (cause == 15 && (*pte_ptr & PAGE_USER) && !(*pte_ptr & PAGE_WRITE)) {
+                if (cause == EXC_STORE_PAGE_FAULT && (*pte_ptr & PAGE_USER) && !(*pte_ptr & PAGE_WRITE)) {
                     if (target_vma->vm_prot & 2) { // PROT_WRITE allowed
                         // Copy-On-Write event confirmed!
                         uart_puts("[Permission fault]: ");
@@ -202,9 +192,9 @@ void trap_handler(struct trap_frame *tf) {
 
             // B. Standard Demand Paging Check
             int perm_ok = 1;
-            if (cause == 15 && !(target_vma->vm_prot & 2)) perm_ok = 0; // PROT_WRITE
-            if (cause == 13 && !(target_vma->vm_prot & 1)) perm_ok = 0; // PROT_READ
-            if (cause == 12 && !(target_vma->vm_prot & 4)) perm_ok = 0; // PROT_EXEC
+            if (cause == EXC_STORE_PAGE_FAULT && !(target_vma->vm_prot & 2)) perm_ok = 0; // PROT_WRITE
+            if (cause == EXC_LOAD_PAGE_FAULT && !(target_vma->vm_prot & 1)) perm_ok = 0; // PROT_READ
+            if (cause == EXC_INST_PAGE_FAULT && !(target_vma->vm_prot & 4)) perm_ok = 0; // PROT_EXEC
 
             if (perm_ok) {
                 void *page = alloc_page();
@@ -236,7 +226,6 @@ void trap_handler(struct trap_frame *tf) {
             uart_puts("[Segmentation fault]: Kill Process\n");
             thread_exit(); 
         }
-        // 若來自核心態且查無 VMA，直接向下流到 Kernel Panic，確保安全
     }
 
     uart_puts("[trap] unhandled exception, halting.\n");

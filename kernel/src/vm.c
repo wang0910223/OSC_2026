@@ -146,15 +146,6 @@ void drop_identity_map(void) {
     pg_dir[2] = 0; // Covers 0x80000000 ~ 0xBFFFFFFF (QEMU RAM)
     pg_dir[3] = 0; // Covers 0xC0000000 ~ 0xFFFFFFFF (Board PLIC)
     asm volatile("sfence.vma zero, zero\n" : : : "memory");
-
-    //  // 故意存取無映射的實體位址
-    // uart_puts("[MMU Test] Trying to read from raw physical address 0x80200000 directly...\n");
-    // volatile unsigned int *raw_phys_ptr = (volatile unsigned int *)0x80200000UL;
-    // unsigned int val = *raw_phys_ptr; // 這行會讀取實體位址
-    
-    // uart_puts("[MMU Test] Value read: "); // 這行將永遠不會被執行到
-    // uart_hex(val);
-    // uart_puts("\n");
 }
 
 /******************* *************************************/
