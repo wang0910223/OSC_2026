@@ -20,6 +20,10 @@ struct vm_area_struct {
     int vm_prot;                    // Protection flags
     int vm_flags;                   // Map flags
     struct vm_area_struct *vm_next; // Pointer to the next VMA
+    
+    // BACKING STORAGE FOR DEMAND PAGING FILE SEGMENTS
+    const void *vm_file_data;       // Pointer to file data in kernel memory
+    unsigned long vm_file_size;     // Size of file data
 };
 
 struct task_struct {

@@ -63,16 +63,16 @@ void trap_handler(struct trap_frame *tf) {
   /* The first bit in scause means asynchronize interrupt (1) or synchronize exception (0) */
 
     // DEBUG USE
-    if (!(cause & SCAUSE_INTR_BIT) && cause != EXC_ECALL_U) {
-        // uart_disable_async();
-        uart_puts("=== S-Mode trap ===\n");
-        uart_puts("scause: ");
-        uart_hex(cause);
-        uart_puts("\n");
-        uart_puts("stval: ");
-        uart_hex(tf->stval);
-        uart_puts("\n");
-    }
+    // if (!(cause & SCAUSE_INTR_BIT) && cause != EXC_ECALL_U) {
+    //     // uart_disable_async();
+    //     uart_puts("=== S-Mode trap ===\n");
+    //     uart_puts("scause: ");
+    //     uart_hex(cause);
+    //     uart_puts("\n");
+    //     uart_puts("stval: ");
+    //     uart_hex(tf->stval);
+    //     uart_puts("\n");
+    // }
 
     // Case: Asynchronous Interrupts  (first bit is 1)
     if (cause & SCAUSE_INTR_BIT) {
@@ -198,10 +198,36 @@ void trap_handler(struct trap_frame *tf) {
 
             if (perm_ok) {
                 void *page = alloc_page();
-                if (page) {
+                // OOM Defensive Check: Terminate process gracefully if memory allocation fails
+                if (!page) {
+                    uart_puts("Out of Memory in Demand Paging! Killing process.\n");
+                    thread_exit();
+                    return;
+                }
+
+                // Check if it is a file-backed VMA (source code)
+                if (target_vma->vm_file_data && target_vma->vm_file_size > 0) {
+                    unsigned long fault_page_va = tf->stval & ~(PAGE_SIZE - 1);
+                    unsigned long offset = fault_page_va - target_vma->vm_start;
+                    unsigned long chunk_size = 0;
+                    if (offset < target_vma->vm_file_size) {
+                        chunk_size = target_vma->vm_file_size - offset;
+                        if (chunk_size > PAGE_SIZE) {
+                            chunk_size = PAGE_SIZE;
+                        }
+                    }
+                    if (chunk_size > 0) {
+                        memcpy(page, (const char *)target_vma->vm_file_data + offset, chunk_size);
+                    }
+                    if (chunk_size < PAGE_SIZE) {
+                        memset((char *)page + chunk_size, 0, PAGE_SIZE - chunk_size);
+                    }
+                } else {
+                    // Anonymous page, zero-initialize (like user stack/heap)
                     memset(page, 0, PAGE_SIZE);
-                    
-                    uart_puts("[Translation fault]: ");
+                }
+                
+                uart_puts("[Translation fault]: ");
                     uart_hex(tf->stval);
                     uart_puts("\n");
 
@@ -216,7 +242,6 @@ void trap_handler(struct trap_frame *tf) {
                     map_pages(curr->pgd, fault_page_va, PAGE_SIZE, __pa(page), page_prot);
                     asm volatile("sfence.vma zero, zero" : : : "memory");
                     return; // 順利排除分頁錯誤，重試執行
-                }
             }
         }
 

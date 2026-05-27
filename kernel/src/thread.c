@@ -258,30 +258,41 @@ int do_exec(const char *path) {
         free_user_space(old_pgd);
     }
     
-    // Allocate new user space
-    unsigned long code_pages = (src_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    const unsigned char *src_ptr = (const unsigned char *)src;
-    for (unsigned long i = 0; i < code_pages; i++) {
-        void *page = alloc_page();
-        unsigned long chunk_size = (src_size > PAGE_SIZE) ? PAGE_SIZE : src_size;
-        byte_copy(page, src_ptr, chunk_size);
-        map_pages(curr->pgd, i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RX);  // source file with RX permission
-        src_ptr += chunk_size;
-        src_size -= chunk_size;
+    // Clear and free old VMAs from the previous executable to avoid memory leaks or overlapping
+    struct vm_area_struct *vma = curr->vma_list;
+    while (vma) {
+        struct vm_area_struct *next_vma = vma->vm_next;
+        kfree(vma);
+        vma = next_vma;
     }
+    curr->vma_list = 0;
     
-    // 1. Eagerly map the FIRST page (Top stack page)
-    void *top_page = alloc_page();
-    memset(top_page, 0, PAGE_SIZE);
-    map_pages(curr->pgd, 0x3ffffff000UL, PAGE_SIZE, __pa(top_page), PAGE_RW);
+    // Allocate new user space (Only VMAs)
+    unsigned long code_pages = (src_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    // 2. Register remaining 3 pages via VMA
+    // 1. Register VMA for user code (lazy-loaded on demand)
+    struct vm_area_struct *code_vma = kmalloc(sizeof(struct vm_area_struct));
+    if (code_vma) {
+        code_vma->vm_start = 0x0;
+        code_vma->vm_end = code_pages * PAGE_SIZE;
+        code_vma->vm_prot = 1 | 4; // PROT_READ | PROT_EXEC
+        code_vma->vm_flags = 0;    // File-backed (not anonymous)
+        code_vma->vm_file_data = src;
+        code_vma->vm_file_size = src_size;
+        
+        code_vma->vm_next = curr->vma_list;
+        curr->vma_list = code_vma;
+    }
+
+    // 2. Register VMA for stack (covers entire 16 KiB range, lazy-loaded on demand)
     struct vm_area_struct *stack_vma = kmalloc(sizeof(struct vm_area_struct));
     if (stack_vma) {
         stack_vma->vm_start = 0x3fffffc000UL;
         stack_vma->vm_end = 0x4000000000UL; // Fully cover the 16KB stack range
         stack_vma->vm_prot = 1 | 2; // PROT_READ | PROT_WRITE
         stack_vma->vm_flags = 0x20; // MAP_ANONYMOUS
+        stack_vma->vm_file_data = 0;
+        stack_vma->vm_file_size = 0;
         
         stack_vma->vm_next = curr->vma_list;
         curr->vma_list = stack_vma;
@@ -323,7 +334,6 @@ int user_program_execute(const char *path) {
     }
     
     unsigned long code_pages = (src_size + PAGE_SIZE - 1) / PAGE_SIZE;
-    const unsigned char *src_ptr = (const unsigned char *)src;
     
     // this critical section is to make sure that we don't switch to another task
     // before we finish setting up the new task's memory and trap frame
@@ -337,28 +347,29 @@ int user_program_execute(const char *path) {
     struct task_struct *task = thread_create(user_program_start);
     task->ppid = get_current()->pid; // Set parent PID so do_waitpid can reap it
     
-    for (unsigned long i = 0; i < code_pages; i++) {
-        void *page = alloc_page();
-        unsigned long chunk_size = (src_size > PAGE_SIZE) ? PAGE_SIZE : src_size;
-        byte_copy(page, src_ptr, chunk_size);
-        map_pages(task->pgd, i * PAGE_SIZE, PAGE_SIZE, __pa(page), PAGE_RX);
-        src_ptr += chunk_size;
-        src_size -= chunk_size;
-    }
-    
-    // 1. Eagerly map the FIRST page (Top stack page)
-    void *top_page = alloc_page();
-    memset(top_page, 0, PAGE_SIZE);
-    // 位址: 0x3ffffff000 ~ 0x4000000000
-    map_pages(task->pgd, 0x3ffffff000UL, PAGE_SIZE, __pa(top_page), PAGE_RW);
+    // 1. Create a VMA for the user code (demand paged)
+    struct vm_area_struct *code_vma = kmalloc(sizeof(struct vm_area_struct));
+    if (code_vma) {
+        code_vma->vm_start = 0x0;
+        code_vma->vm_end = code_pages * PAGE_SIZE;
+        code_vma->vm_prot = 1 | 4; // PROT_READ | PROT_EXEC
+        code_vma->vm_flags = 0;    // File-backed
+        code_vma->vm_file_data = src;
+        code_vma->vm_file_size = src_size;
 
-    // 2. Register the remaining 3 pages (12 KiB) via VMA
+        code_vma->vm_next = task->vma_list;
+        task->vma_list = code_vma;
+    }
+
+    // 2. Register stack via VMA (full 16KB stack range, demand paged)
     struct vm_area_struct *stack_vma = kmalloc(sizeof(struct vm_area_struct));
     if (stack_vma) {
         stack_vma->vm_start = 0x3fffffc000UL; // 陣列起點
-        stack_vma->vm_end = 0x4000000000UL;   // 涵蓋整個 16KB Stack 區域，包含 eager top page
+        stack_vma->vm_end = 0x4000000000UL;   // 涵蓋整個 16KB Stack 區域
         stack_vma->vm_prot = 1 | 2; // PROT_READ | PROT_WRITE
         stack_vma->vm_flags = 0x20; // MAP_ANONYMOUS
+        stack_vma->vm_file_data = 0;
+        stack_vma->vm_file_size = 0;
         
         stack_vma->vm_next = task->vma_list;
         task->vma_list = stack_vma;
@@ -388,6 +399,8 @@ long do_fork(struct trap_frame *tf) {
             new_vma->vm_end = parent_vma->vm_end;
             new_vma->vm_prot = parent_vma->vm_prot;
             new_vma->vm_flags = parent_vma->vm_flags;
+            new_vma->vm_file_data = parent_vma->vm_file_data;
+            new_vma->vm_file_size = parent_vma->vm_file_size;
             new_vma->vm_next = NULL;
 
             if (!child->vma_list) {
@@ -504,6 +517,16 @@ long do_waitpid(long pid) {
                             free_user_space(curr->pgd);
                             curr->pgd = 0;
                         }
+                        
+                        // FREE ALL VMAs
+                        struct vm_area_struct *vma = curr->vma_list;
+                        while (vma) {
+                            struct vm_area_struct *next_vma = vma->vm_next;
+                            kfree(vma);
+                            vma = next_vma;
+                        }
+                        curr->vma_list = 0;
+
                         kfree((void *)curr->stack);
                         kfree(curr);
                         
