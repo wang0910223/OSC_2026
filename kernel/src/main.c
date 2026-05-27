@@ -37,29 +37,6 @@ void main(int hart_id, void *dtb_ptr)
         cpio_addr = (char *)__va(cpio_addr);
 
     drop_identity_map();
-        // 讀取 satp 控制暫存器
-    // unsigned long satp_val;
-    // asm volatile("csrr %0, satp" : "=r"(satp_val));
-
-    // uart_puts("\n[MMU Test] Current satp register value: ");
-    // uart_hex(satp_val);
-    // uart_puts("\n");
-
-    // // 解析 satp 欄位
-    // unsigned long mode = satp_val >> 60; // 取得最高 4 位的 MODE 欄位
-    // unsigned long ppn = satp_val & 0xfffffffffffUL; // 取得低位的分頁表實體頁框號 (PPN)
-
-    // if (mode == 8) {
-    //     uart_puts("[MMU Test] SUCCESS: MMU is actively running in Sv39 (3-level) mode!\n");
-    // } else if (mode == 0) {
-    //     uart_puts("[MMU Test] FAILED: MMU is turned off (Bare Mode).\n");
-    // } else {
-    //     uart_puts("[MMU Test] Running in another mode.\n");
-    // }
-
-    // uart_puts("[MMU Test] Root Page Table physical address (PPN * 4KB): ");
-    // uart_hex(ppn << 12);
-    // uart_puts("\n\n");
 
 
 #ifdef DEBUG

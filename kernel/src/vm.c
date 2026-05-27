@@ -115,9 +115,6 @@ void setup_vm(void) {
     map_pages_4k(pg_dir, PAGE_OFFSET + 0x10100000, 0x1000, 0x10100000, mmio_prot);
 #else
 
-    // map_pages_2m(pg_dir, 0x00000000, 0x8000000, 0x00000000, PAGE_READ | PAGE_WRITE | PAGE_EXEC | PAGE_GLOBAL);
-    // map_pages_2m(pg_dir, PAGE_OFFSET + 0x00000000, 0x8000000, 0x00000000, PAGE_READ | PAGE_WRITE | PAGE_EXEC | PAGE_GLOBAL);
-
     map_pages_2m(pg_dir, 0x00000000, 0x80000000, 0x00000000, PAGE_READ | PAGE_WRITE | PAGE_EXEC | PAGE_GLOBAL);
     map_pages_2m(pg_dir, PAGE_OFFSET + 0x00000000, 0x80000000, 0x00000000, PAGE_READ | PAGE_WRITE | PAGE_EXEC | PAGE_GLOBAL);
     
