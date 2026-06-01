@@ -61,6 +61,8 @@ long do_mmap(void *addr, unsigned long length, int prot, int flags) {
     new_vma->vm_end = vm_start + length;
     new_vma->vm_prot = prot;
     new_vma->vm_flags = flags;
+    new_vma->vm_file_data = 0;
+    new_vma->vm_file_size = 0;
     new_vma->vm_next = curr->vma_list;
     curr->vma_list = new_vma;
 
